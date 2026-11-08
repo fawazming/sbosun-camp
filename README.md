@@ -16,21 +16,25 @@ The interface, brand system and user journeys were extracted from the SB HIC Nex
 ### Public site
 
 - Branded landing page: hero, live countdown, early-bird pricing, classes, 9-panel scrollytelling camp highlights with real photos/video, 22-photo gallery with lightbox, lecturer carousel, newsletter signup, enquiry footer and “Memory Lane” audio player.
-- Full delegate registration with server-side validation:
+- **Pay-first registration**: the delegate chooses email, phone, category and payment plan, pays, and only then unlocks the full delegate form (step 2). A lightweight participant shell is created at payment time, so no full profile is collected before money is confirmed.
+- Full delegate profile after payment:
   - name, gender, age bracket, email, phone/WhatsApp, category, zone;
   - **next-of-kin phone** and **allergies/existing ailment**;
-  - under-18 guardian fields;
-  - full payment or 10-instalment preference.
+  - under-18 guardian fields, optional health notes.
 - Automatic class placement from category and unique registration number (`SB-26-XXXXXX`).
-- Personal delegate portal (`/portal/{token}`) with balance, payment history, payment buttons, camp details and ID card.
+- Personal delegate portal (`/portal/{token}`) with payment status, completion CTA, balance, payment history, camp details and ID card.
+- **Find Registration** supports two methods:
+  - payment reference + payer email (works immediately after payment, before the form is completed);
+  - registration ID + surname (works after the profile is completed).
+- **Bulk registration & payment**: one buyer pays for up to 50 seats; after payment, the buyer portal issues a unique one-time completion link per delegate. Each seat becomes its own participant, portal and ID card.
 - Server-authoritative pricing (early bird vs flat rate); browser-submitted totals are never trusted.
-- Instalment plan: 10 parts, last part absorbs rounding; closes with early bird.
-- Payment modes:
-  - **mock** — local sandbox checkout for testing;
+- **Smarter instalments**: every next amount is quoted from the real outstanding balance and remaining instalments, not by repeatedly dividing the old price. If the general camp fee or phase changes, pending amounts are recalculated; unpaid hosted checkouts are retired and a fresh checkout is started. Full payments lock in the price actually paid.
+- Payment modes controlled by **`PAYMENT_MODE` in `.env`**:
+  - **mock** — sandbox checkout for local testing;
   - **manual** — bank transfer + WhatsApp receipt + finance-admin approval;
   - **hosted** — PayVessel / PayFlow hosted checkout with server-side verification.
 - Server-side callback verification, idempotent verification, underpayment rejection and signed webhook handling.
-- Registration status lookup by registration number + surname (rate-limited, minimal data).
+- Registration status lookup by payment reference + email or registration number + surname (rate-limited, minimal data).
 - Printable delegate ID card (no phone/email/payment reference/welfare data on the card).
 - `.ics` calendar download.
 - Newsletter subscribe/unsubscribe with token and one-click unsubscribe.
@@ -43,8 +47,10 @@ The interface, brand system and user journeys were extracted from the SB HIC Nex
 - Role-based access:
   - Super Admin, Registration Admin, Finance Admin, Attendance Admin, House Admin, Viewer, Zone Admin.
 - Dashboard: registrations, paid/partial/pending, expected vs present, attendance %, verified revenue, pending transactions, zone/category/gender splits, house occupancy, latest registrations and pending payments.
-- Participants: combined filters (search, gender, category, payment, attendance, house, zone, date range), pagination, filtered CSV export, detail view with protected welfare fields, check-in/undo, house assignment, soft-delete.
-- Payments: status tabs, search, verified total, manual approval, refund with reason, CSV export.
+- Participants: combined filters (search, gender, category, payment, attendance, house, zone, date range), pagination, filtered CSV export, detail view with protected welfare fields, incomplete-profile badge, check-in/undo, house assignment, soft-delete.
+- Payments: status tabs, search (including bulk buyers), verified total, manual approval, refund with reason, CSV export.
+- **Bulk orders**: buyer, seats, amount, payment status and form-completion progress, with a direct link to the buyer portal.
+- **Database viewer** (Super Admin only): browse every table with row counts, column metadata, paginated data (password hashes masked), and a read-only SELECT/WITH query console capped at 200 rows. Write/schema statements are blocked.
 - Check-in desk: large fast search, payment gate, one-tap check-in, undo with logged reason, recent arrivals and live counts.
 - Houses: create, activate/deactivate, capacity progress, auto-assign fully-paid delegates, manual assignment.
 - Reports: registration, payment, attendance, house and newsletter CSV exports.
@@ -141,7 +147,15 @@ Run `php install.php` once. A reference schema is included at `database/schema.m
 
 ## 5. Payment configuration
 
-All payment settings are in `.env`; the active mode is editable in **Admin → Settings** (stored in `settings.payment_mode`).
+**`PAYMENT_MODE` in `.env` is the single switch.** Admin → Settings displays the active mode read-only. Change the environment value and reload:
+
+```dotenv
+PAYMENT_MODE=mock      # sandbox, no real money
+PAYMENT_MODE=manual    # bank transfer + admin approval
+PAYMENT_MODE=hosted    # live PayVessel / PayFlow checkout
+```
+
+For a live deployment set `PAYMENT_MODE=hosted`, add live keys and callback URL, then confirm a small live transaction before opening registration. The mock route returns 404 whenever the mode is not `mock`.
 
 ### 5.1 Mock (default, safe for local testing)
 
@@ -211,9 +225,9 @@ Registration confirmation and newsletter emails are attempted after the database
 
 | Role | Access |
 |---|---|
-| Super Admin | Everything, including users, settings and audit |
-| Registration Admin | Participants, check-in desk, newsletter |
-| Finance Admin | Payments, approvals, refunds, exports |
+| Super Admin | Everything, including users, settings, audit and the database viewer |
+| Registration Admin | Participants, check-in desk, newsletter, bulk orders |
+| Finance Admin | Payments, approvals, refunds, exports, bulk orders |
 | Attendance Admin | Check-in desk |
 | House Admin | House allocation |
 | Zone Admin | Read access scoped to their zone |
@@ -228,8 +242,10 @@ Admin passwords are stored with `password_hash()`; there is deliberately no publ
 - `settings` — all editable programme values.
 - `classes` — class names and eligible categories.
 - `houses` — gender-specific houses and capacities.
-- `participants` — delegate record, including `nok_phone`, `nok_name`, `allergies`, `health_challenges`, guardian fields, payment totals, soft delete.
-- `payments` — one row per attempt/instalment: reference, provider reference, amount, type, plan, status, account/checkout details.
+- `participants` — delegate record, including pay-first `profile_completed`, `nok_phone`, `nok_name`, `allergies`, `health_challenges`, guardian fields, payment totals, soft delete.
+- `bulk_orders` — buyer email/phone, seats, amount, status, reference, buyer portal token.
+- `bulk_tickets` — one row per bulk seat: unique one-time token, category, price, used flag, linked participant.
+- `payments` — one row per attempt/instalment: reference, provider reference, amount, type, plan, status, account/checkout details, nullable `bulk_order_id` for bulk payments.
 - `payment_events` — idempotent webhook/verification ledger with raw payload.
 - `attendance` — check-in state, staff member, corrections.
 - `admin_users` — role, zone, protected flag, status, last login.
@@ -245,13 +261,18 @@ Public (query-string URLs; clean URLs work with the included `.htaccess`):
 
 ```text
 /                          home
-/register                  registration form (GET/POST)
+/register                  pay-first registration (GET/POST)
+/complete/{token}          step 2 delegate form (after payment)
 /portal/{token}            delegate portal
+/bulk                      bulk order form (GET/POST)
+/bulk/{token}              buyer portal with per-seat links
+/bulk/retry/{token}        refresh/retry bulk payment (POST)
+/complete-ticket/{token}   one-time bulk delegate completion
 /pay/start                 start a payment (POST)
-/pay/mock/{reference}      sandbox checkout
+/pay/mock/{reference}      sandbox checkout (only when PAYMENT_MODE=mock)
 /payment/callback          gateway return / status page
 /payment/webhook           signed provider webhook (POST)
-/status                    registration lookup
+/status                    find registration (reference+email or ID+surname)
 /id-card/{token}           printable ID card
 /event.ics                 calendar download
 /newsletter                subscribe (POST)
@@ -266,13 +287,15 @@ Admin:
 /admin/participants        list / filters / export
 /admin/participants/{id}   detail / check-in / house / archive
 /admin/payments            transactions / approve / refund / export
+/admin/bulk                bulk orders and completion progress
 /admin/check-in            check-in desk
 /admin/houses              houses / auto-assign
 /admin/reports             CSV exports
 /admin/newsletter          subscribers / broadcast
 /admin/users               admin accounts
-/admin/settings            programme configuration
+/admin/settings            programme configuration (payment mode is read-only)
 /admin/audit               audit log
+/admin/database            Super Admin read-only database viewer + SELECT console
 ```
 
 With query routing, the same paths are `index.php?r=admin/dashboard`, etc. The app generates query URLs by default so it works without `mod_rewrite`; clean URLs are supported by `.htaccess`.
@@ -318,28 +341,36 @@ sbosun-camp/
 
 1. Early bird applies while `now <= early_bird_deadline` in `Africa/Lagos`; otherwise flat rate.
 2. The server computes every price; client prices are ignored.
-3. Instalments are 10 parts, early bird only; the last part absorbs rounding.
-4. A verified payment can only create one verification event per provider reference.
-5. Underpaid or duplicate transfers never mark a delegate paid.
-6. House assignment is random/least-occupied from the gender list, and only for fully paid delegates.
-7. Each edition writes to the same normalised tables (edition year is a setting); historical isolation can be added with an edition column.
-8. Failed/cancelled/expired payments never count as paid.
-9. Soft-deleted delegates disappear from reports, lists and exports.
-10. Mail/webhook failures never block a completed registration/payment.
+3. **Pay first, profile second.** No full delegate profile is required to start a payment. A verified payment unlocks the completion form.
+4. Instalments are available before the early-bird deadline. An existing instalment plan may continue after the deadline at the flat rate, but new plans cannot start.
+5. Every next instalment is `outstanding balance ÷ remaining instalments` (integer division, last payment absorbs the remainder), so price changes and prior payments are always reflected.
+6. A full payment locks in the amount actually paid; later price changes never create a balance for that delegate.
+7. Pending mock/manual payments are recalculated when the general fee changes. A stale hosted checkout is retired and a fresh checkout is required.
+8. A verified payment can only create one verification event per provider reference.
+9. Underpaid or duplicate transfers never mark a delegate paid.
+10. House assignment is random/least-occupied from the gender list, and only for fully paid **and profile-completed** delegates.
+11. Bulk orders are one payment for up to 50 seats; each seat’s one-time link can create exactly one participant. A used link is rejected.
+12. Each edition writes to the same normalised tables (edition year is a setting); historical isolation can be added with an edition column.
+13. Failed/cancelled/expired payments never count as paid.
+14. Soft-deleted delegates disappear from reports, lists and exports.
+15. Mail/webhook failures never block a completed registration/payment.
 
 ---
 
 ## 12. Verification performed in this build
 
 - `php -l` across every PHP file: clean.
-- Fresh SQLite install: tables, settings, 3 classes, 4 houses and Super Admin created.
-- Public home, register, status, checklist, gallery assets, ID card, `.ics`, login pages return 200.
-- Full registration → portal → mock checkout → verified payment → `FULLY_PAID` → automatic house assignment.
-- Status lookup by registration ID + surname.
-- Newsletter AJAX subscribe.
-- Admin login, dashboard, participants, payments, check-in, houses, reports, users, settings, audit and newsletter pages all 200.
-- Filtered CSV export with correct headers and escaped values.
-- Admin check-in for a fully paid delegate, with state update.
+- Fresh SQLite install: tables, settings, 3 classes, 4 houses and Super Admin created. In-place upgrade added `profile_completed`, `bulk_order_id`, `bulk_orders` and `bulk_tickets`.
+- Public home, register, bulk, status, ID card, `.ics` and login pages return 200 at 1440 px and 390 px with no horizontal overflow or console errors.
+- **Pay-first flow**: pay-only form → mock checkout → verified payment → `profile_completed=0` → completion CTA → full profile → `profile_completed=1` → automatic house assignment.
+- **Find Registration**: payment reference + email opened the portal; registration ID + surname lookup also verified.
+- **Instalment intelligence**: after changing the early-bird fee, the next quote recalculated from the outstanding balance; a stale pending amount (`₦1,016`) was automatically refreshed to the restored amount (`₦850`). Lapsed phase correctly moved the plan to the flat rate.
+- **Bulk flow**: 3 seats / ₦25,500 in one mock payment → buyer portal with 3 one-time links → each link created a separate participant, payment row, portal and house; order moved to `COMPLETED`; reusing a link was rejected.
+- **Bulk lookup** by payment reference + buyer email redirected to the buyer portal.
+- **Env switch**: changing `PAYMENT_MODE` in `.env` to `manual` immediately changed `payment_mode()` and made the mock route return 404; restored to `mock`.
+- Admin login, dashboard, participants, payments, bulk orders, check-in, houses, reports, users, settings, audit, newsletter and database viewer all 200.
+- Database viewer loaded table data, executed a read-only SELECT, and rejected a `DELETE` statement.
+- Filtered CSV export with correct headers, escaped values and formula-injection guard.
 - Manual payment flow: pending transfer → finance admin approval → `PARTIALLY_PAID` → refund → `NOT_PAID` with audit entry.
 - Settings save with re-rendered pricing phase.
 - No PHP warnings/errors in tested pages or the server log.
@@ -368,7 +399,9 @@ Not tested live because no credentials were supplied: real SMTP delivery and liv
 - Dates follow `newC/improve.txt`: **24–28 December 2026** (the old UI said 23–27; changed as instructed).
 - Categories are the real ones in the existing form: `JSS 1-3`, `SS1- SSS 3`, `School Leaver`, `Undergraduate`, `Graduate`, `Others`.
 - Fees remain **₦8,500 early bird / ₦12,000 flat**, early-bird closing **30 November 2026**.
-- The portal defaults to **SQLite** so it runs immediately in this environment; MySQL is fully supported and documented.
+- The portal defaults to **SQLite** so it runs immediately in this environment; MySQL is fully supported and documented. Super Admins can browse the SQLite data in **Admin → Database** and run read-only SELECT queries.
+- The pay-first decision means a paid delegate who has not finished step 2 appears in admin as “details pending”. Check-in and house allocation are deliberately blocked until the profile is complete.
+- Bulk orders are full-payment only; delegates who need instalments should register individually.
 - The admin console is server-rendered PHP with small vanilla-JS enhancements; no SPA or build pipeline.
 - UI assets (gallery, highlights, lecturers, videos, Memory Lane audio) were copied from the `sb-hic` app.
 - This folder is its own Git repository. Add a remote and push when ready:

@@ -9,7 +9,31 @@ $icon = $state === 'verified' ? '✓' : ($state === 'pending' ? '⏳' : '✕');
     <div class="center-card">
       <div class="result-icon <?= e($iconClass) ?>"><?= $icon ?></div>
 
-      <?php if ($state === 'verified'): ?>
+      <?php if ($bulkOrder): ?>
+        <?php if ($state === 'verified'): ?>
+          <p class="eyebrow">Bulk payment confirmed</p>
+          <h1 style="font-size:27px;margin-top:4px">Your seats are ready.</h1>
+          <p class="small muted" style="margin-top:7px">Share one unique completion link with each delegate. Each link works exactly once.</p>
+          <div class="detail-list">
+            <div class="dl-row"><span>Buyer</span><span><?= e($bulkOrder['buyer_email']) ?></span></div>
+            <div class="dl-row"><span>Seats</span><span><?= (int) $bulkOrder['seats'] ?></span></div>
+            <div class="dl-row"><span>Amount paid</span><span><?= money((int) $bulkOrder['amount']) ?></span></div>
+            <div class="dl-row"><span>Status</span><span><?= e(bulk_order_status_label($bulkOrder['status'])) ?></span></div>
+          </div>
+          <a class="btn btn-green btn-block" style="margin-top:18px" href="<?= e(url('bulk/' . $bulkOrder['token'])) ?>">Open buyer portal &amp; seat links</a>
+        <?php elseif ($state === 'pending'): ?>
+          <p class="eyebrow">Bulk payment pending</p>
+          <h1 style="font-size:26px;margin-top:4px">We’re confirming your bulk payment.</h1>
+          <p class="small muted" style="margin-top:7px"><?= e($result['message'] ?? '') ?> Seat links unlock after confirmation.</p>
+          <a class="btn btn-green btn-block" style="margin-top:18px" href="<?= e(url('bulk/' . $bulkOrder['token'])) ?>">Check my bulk order</a>
+        <?php else: ?>
+          <p class="eyebrow" style="color:var(--red)">Bulk payment not completed</p>
+          <h1 style="font-size:26px;margin-top:4px">This payment didn’t go through.</h1>
+          <p class="small muted" style="margin-top:7px"><?= e($result['message'] ?? 'No charge was completed. You can retry from the buyer portal.') ?></p>
+          <a class="btn btn-gold btn-block" style="margin-top:18px" href="<?= e(url('bulk/' . $bulkOrder['token'])) ?>">Retry payment</a>
+        <?php endif; ?>
+
+      <?php elseif ($state === 'verified'): ?>
         <p class="eyebrow">Payment confirmed</p>
         <h1 style="font-size:28px;margin-top:4px">You’re all set<?= $fullName ? ', ' . e(explode(' ', $fullName)[0]) : '' ?>.</h1>
         <p class="small muted" style="margin-top:7px">Your payment has been independently verified on our server.</p>
@@ -20,11 +44,17 @@ $icon = $state === 'verified' ? '✓' : ($state === 'pending' ? '⏳' : '✕');
           <div class="dl-row"><span>House</span><span><?= e($house['name'] ?? 'Assigned shortly') ?></span></div>
         </div>
         <?php if (($participant['payment_status'] ?? '') === 'PARTIALLY_PAID'): ?>
-          <p class="notice notice-amber">This instalment is confirmed. Return to your portal any time to pay the next one before the early-bird deadline.</p>
+          <p class="notice notice-amber">This instalment is confirmed. Return to your portal any time to pay the next one; remaining amounts adjust to the current general fee.</p>
+        <?php endif; ?>
+        <?php if ((int) ($participant['profile_completed'] ?? 0) === 0): ?>
+          <p class="notice notice-amber">Payment is confirmed. One more step: complete your delegate details to unlock your ID card and house.</p>
+          <a class="btn btn-gold btn-block" style="margin-top:12px" href="<?= e(url('complete/' . $participant['token'])) ?>">Complete my registration</a>
         <?php endif; ?>
         <div style="display:flex;flex-direction:column;gap:8px;margin-top:18px">
           <a class="btn btn-green btn-block" href="<?= e(url('portal/' . $participant['token'])) ?>">View my registration</a>
-          <a class="btn btn-outline-green btn-block" href="<?= e(url('id-card/' . $participant['token'])) ?>">Open my ID card</a>
+          <?php if ((int) ($participant['profile_completed'] ?? 0) === 1): ?>
+            <a class="btn btn-outline-green btn-block" href="<?= e(url('id-card/' . $participant['token'])) ?>">Open my ID card</a>
+          <?php endif; ?>
         </div>
 
       <?php elseif ($state === 'pending'): ?>

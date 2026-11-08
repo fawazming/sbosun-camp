@@ -48,8 +48,8 @@ function admin_dashboard(): void
         'partial'   => (int) db_value("SELECT COUNT(*) FROM participants p WHERE p.deleted_at IS NULL AND p.payment_status = 'PARTIALLY_PAID'{$scope}", $scopeParams, 0),
         'not_paid'  => (int) db_value("SELECT COUNT(*) FROM participants p WHERE p.deleted_at IS NULL AND p.payment_status = 'NOT_PAID'{$scope}", $scopeParams, 0),
         'present'   => (int) db_value("SELECT COUNT(*) FROM participants p WHERE p.deleted_at IS NULL AND p.attendance_status = 'PRESENT'{$scope}", $scopeParams, 0),
-        'collected' => (int) db_value("SELECT COALESCE(SUM(pay.amount),0) FROM payments pay JOIN participants p ON p.id = pay.participant_id WHERE pay.status = 'VERIFIED' AND p.deleted_at IS NULL{$scope}", $scopeParams, 0),
-        'pending_tx' => (int) db_value("SELECT COUNT(*) FROM payments pay JOIN participants p ON p.id = pay.participant_id WHERE pay.status = 'PENDING' AND p.deleted_at IS NULL{$scope}", $scopeParams, 0),
+        'collected' => (int) db_value("SELECT COALESCE(SUM(pay.amount),0) FROM payments pay LEFT JOIN participants p ON p.id = pay.participant_id WHERE pay.status = 'VERIFIED' AND (p.id IS NULL OR p.deleted_at IS NULL){$scope}", $scopeParams, 0),
+        'pending_tx' => (int) db_value("SELECT COUNT(*) FROM payments pay LEFT JOIN participants p ON p.id = pay.participant_id WHERE pay.status = 'PENDING' AND (p.id IS NULL OR p.deleted_at IS NULL){$scope}", $scopeParams, 0),
         'today'     => (int) db_value("SELECT COUNT(*) FROM participants p WHERE p.deleted_at IS NULL AND substr(p.created_at,1,10) = ?{$scope}", array_merge([date('Y-m-d')], $scopeParams), 0),
     ];
     $stats['expected'] = $stats['total'];
@@ -60,7 +60,12 @@ function admin_dashboard(): void
     $byCategory = db_all("SELECT p.category, COUNT(*) AS total FROM participants p WHERE p.deleted_at IS NULL{$scope} GROUP BY p.category ORDER BY total DESC", $scopeParams);
     $byGender = db_all("SELECT p.gender, COUNT(*) AS total FROM participants p WHERE p.deleted_at IS NULL{$scope} GROUP BY p.gender", $scopeParams);
     $recent = db_all("SELECT p.*, c.name AS class_name, h.name AS house_name FROM participants p LEFT JOIN classes c ON c.id = p.class_id LEFT JOIN houses h ON h.id = p.house_id WHERE p.deleted_at IS NULL{$scope} ORDER BY p.id DESC LIMIT 8", $scopeParams);
-    $pending = db_all("SELECT pay.*, p.registration_id, p.other_name, p.surname FROM payments pay JOIN participants p ON p.id = pay.participant_id WHERE pay.status = 'PENDING' AND p.deleted_at IS NULL{$scope} ORDER BY pay.id DESC LIMIT 6", $scopeParams);
+    $pending = db_all("SELECT pay.*, p.registration_id, p.other_name, p.surname, b.buyer_email, b.seats AS bulk_seats
+        FROM payments pay
+        LEFT JOIN participants p ON p.id = pay.participant_id
+        LEFT JOIN bulk_orders b ON b.id = pay.bulk_order_id
+        WHERE pay.status = 'PENDING' AND (p.id IS NULL OR p.deleted_at IS NULL){$scope}
+        ORDER BY pay.id DESC LIMIT 6", $scopeParams);
     $houses = db_all("SELECT h.*, (SELECT COUNT(*) FROM participants p WHERE p.house_id = h.id AND p.deleted_at IS NULL) AS occupants FROM houses h ORDER BY h.gender, h.name");
 
     view('admin/dashboard', [
@@ -231,11 +236,12 @@ function admin_participants_export(): void
     csv_download('sb-osun-registrations-' . date('Y-m-d') . '.csv', [
         'Registration ID', 'Surname', 'Other Name', 'Gender', 'Age Group', 'Category', 'Class', 'Zone',
         'Phone', 'Email', 'Next of Kin', 'Next of Kin Phone', 'Allergies/Ailment', 'Minor', 'Guardian',
-        'Guardian Contact', 'Payment Status', 'Amount Owed', 'Amount Paid', 'Attendance', 'House', 'Registered',
+        'Guardian Contact', 'Profile Complete', 'Payment Status', 'Amount Owed', 'Amount Paid', 'Attendance', 'House', 'Registered',
     ], array_map(static fn(array $p): array => [
         $p['registration_id'], $p['surname'], $p['other_name'], $p['gender'], $p['age_group'], $p['category'],
         $p['class_name'], $p['zone'], $p['phone'], $p['email'], $p['nok_name'], $p['nok_phone'], $p['allergies'],
-        $p['is_minor'] ? 'Yes' : 'No', $p['guardian_name'], $p['guardian_contact'], $p['payment_status'],
+        $p['is_minor'] ? 'Yes' : 'No', $p['guardian_name'], $p['guardian_contact'],
+        (int) ($p['profile_completed'] ?? 0) === 1 ? 'Yes' : 'No', $p['payment_status'],
         $p['amount_owed'], $p['amount_paid'], $p['attendance_status'], $p['house_name'], $p['created_at'],
     ], $rows));
 }
@@ -253,14 +259,16 @@ function admin_payments(): void
         $params[] = $status;
     }
     if ($search !== '') {
-        $where .= ' AND (pay.reference LIKE ? OR pay.provider_reference LIKE ? OR p.registration_id LIKE ? OR p.surname LIKE ? OR p.other_name LIKE ?)';
+        $where .= ' AND (pay.reference LIKE ? OR pay.provider_reference LIKE ? OR p.registration_id LIKE ? OR p.surname LIKE ? OR p.other_name LIKE ? OR b.buyer_email LIKE ?)';
         $like = '%' . $search . '%';
-        array_push($params, $like, $like, $like, $like, $like);
+        array_push($params, $like, $like, $like, $like, $like, $like);
     }
 
     $rows = db_all(
-        "SELECT pay.*, p.registration_id, p.surname, p.other_name, p.zone
-         FROM payments pay JOIN participants p ON p.id = pay.participant_id
+        "SELECT pay.*, p.registration_id, p.surname, p.other_name, p.zone, b.buyer_email, b.seats AS bulk_seats
+         FROM payments pay
+         LEFT JOIN participants p ON p.id = pay.participant_id
+         LEFT JOIN bulk_orders b ON b.id = pay.bulk_order_id
          WHERE {$where} ORDER BY pay.id DESC LIMIT 300",
         $params
     );
@@ -298,7 +306,8 @@ function admin_payment_action(array $params): void
         } else {
             $result = mark_payment_verified($payment, 'MANUAL-' . strtoupper(bin2hex(random_bytes(4))), (int) $payment['amount'], 'manual-admin');
             audit('APPROVE_PAYMENT', 'payment', (string) $payment['reference'], null, ['admin' => $admin['name']]);
-            flash($result['ok'] ? 'success' : 'error', $result['ok'] ? 'Payment approved and participant updated.' : $result['message']);
+            $label = $payment['payment_type'] === 'BULK' ? 'Payment approved and bulk seat links unlocked.' : 'Payment approved and participant updated.';
+            flash($result['ok'] ? 'success' : 'error', $result['ok'] ? $label : $result['message']);
         }
     } elseif ($action === 'refund') {
         $reason = trim((string) post('reason'));
@@ -308,13 +317,17 @@ function admin_payment_action(array $params): void
             flash('error', 'Only verified payments can be refunded.');
         } else {
             db_update('payments', ['status' => 'REFUNDED', 'failure_reason' => 'Refund: ' . $reason, 'updated_at' => now()], 'id = ?', [$payment['id']]);
-            $updatedParticipant = refresh_participant_payment((int) $payment['participant_id']);
-            if (($updatedParticipant['payment_status'] ?? '') !== 'FULLY_PAID' && !empty($updatedParticipant['house_id'])) {
-                db_update('participants', ['house_id' => null], 'id = ?', [$updatedParticipant['id']]);
-                audit('RELEASE_HOUSE', 'participant', (string) $updatedParticipant['id'], ['house_id' => $updatedParticipant['house_id']], ['reason' => 'refund']);
+            if ($payment['payment_type'] === 'BULK' && !empty($payment['bulk_order_id'])) {
+                db_update('bulk_orders', ['status' => 'REFUNDED', 'updated_at' => now()], 'id = ?', [$payment['bulk_order_id']]);
+            } elseif ((int) $payment['participant_id'] > 0) {
+                $updatedParticipant = refresh_participant_payment((int) $payment['participant_id']);
+                if (($updatedParticipant['payment_status'] ?? '') !== 'FULLY_PAID' && !empty($updatedParticipant['house_id'])) {
+                    db_update('participants', ['house_id' => null], 'id = ?', [$updatedParticipant['id']]);
+                    audit('RELEASE_HOUSE', 'participant', (string) $updatedParticipant['id'], ['house_id' => $updatedParticipant['house_id']], ['reason' => 'refund']);
+                }
             }
             audit('REFUND_PAYMENT', 'payment', (string) $payment['reference'], ['status' => 'VERIFIED'], ['status' => 'REFUNDED', 'reason' => $reason, 'admin' => $admin['name']]);
-            flash('success', 'Refund recorded and participant balance recalculated.');
+            flash('success', 'Refund recorded and balances recalculated.');
         }
     }
     redirect_route('admin/payments');
@@ -324,18 +337,22 @@ function admin_payments_export(): void
 {
     $admin = require_admin(['FINANCE_ADMIN', 'VIEWER', 'SUPER_ADMIN']);
     $rows = db_all(
-        "SELECT pay.*, p.registration_id, p.surname, p.other_name, p.zone
-         FROM payments pay JOIN participants p ON p.id = pay.participant_id
-         WHERE p.deleted_at IS NULL ORDER BY pay.id DESC"
+        "SELECT pay.*, p.registration_id, p.surname, p.other_name, p.zone, b.buyer_email, b.seats AS bulk_seats
+         FROM payments pay
+         LEFT JOIN participants p ON p.id = pay.participant_id
+         LEFT JOIN bulk_orders b ON b.id = pay.bulk_order_id
+         WHERE p.id IS NULL OR p.deleted_at IS NULL ORDER BY pay.id DESC"
     );
     audit('EXPORT_PAYMENTS', 'report', 'payments');
     csv_download('sb-osun-payments-' . date('Y-m-d') . '.csv', [
         'Reference', 'Provider Reference', 'Registration ID', 'Name', 'Zone', 'Type', 'Instalment',
-        'Plan', 'Amount', 'Status', 'Provider', 'Paid At', 'Created At',
+        'Seats', 'Plan', 'Amount', 'Status', 'Provider', 'Paid At', 'Created At',
     ], array_map(static fn(array $p): array => [
-        $p['reference'], $p['provider_reference'], $p['registration_id'], $p['other_name'] . ' ' . $p['surname'],
-        $p['zone'], $p['payment_type'], $p['installment_number'], $p['plan_rate'], $p['amount'], $p['status'],
-        $p['provider'], $p['paid_at'], $p['created_at'],
+        $p['reference'], $p['provider_reference'],
+        $p['registration_id'] ?: ($p['bulk_order_id'] ? 'BULK' : ''),
+        $p['registration_id'] ? ($p['other_name'] . ' ' . $p['surname']) : ($p['buyer_email'] ?: 'Bulk buyer'),
+        $p['zone'], $p['payment_type'], $p['installment_number'], $p['bulk_seats'] ?? '',
+        $p['plan_rate'], $p['amount'], $p['status'], $p['provider'], $p['paid_at'], $p['created_at'],
     ], $rows));
 }
 
@@ -353,9 +370,9 @@ function admin_checkin(): void
              LEFT JOIN classes c ON c.id = p.class_id
              LEFT JOIN houses h ON h.id = p.house_id
              LEFT JOIN attendance a ON a.participant_id = p.id
-             WHERE p.deleted_at IS NULL AND (p.registration_id LIKE ? OR p.surname LIKE ? OR p.other_name LIKE ? OR p.phone LIKE ?)
-             ORDER BY p.surname LIMIT 20",
-            [$like, $like, $like, $like]
+             WHERE p.deleted_at IS NULL AND (p.registration_id LIKE ? OR p.surname LIKE ? OR p.other_name LIKE ? OR p.phone LIKE ? OR p.email LIKE ?)
+             ORDER BY p.surname, p.other_name LIMIT 20",
+            [$like, $like, $like, $like, $like]
         );
     }
     $expected = count_rows('participants', 'deleted_at IS NULL');
@@ -401,7 +418,7 @@ function admin_houses(): void
     );
     $unassigned = db_all(
         "SELECT p.* FROM participants p
-         WHERE p.deleted_at IS NULL AND p.payment_status = 'FULLY_PAID' AND p.house_id IS NULL
+         WHERE p.deleted_at IS NULL AND p.payment_status = 'FULLY_PAID' AND p.profile_completed = 1 AND p.house_id IS NULL
          ORDER BY p.id"
     );
     view('admin/houses', [
@@ -438,7 +455,7 @@ function admin_house_action(): void
             flash('success', 'House ' . strtolower($status) . '.');
         }
     } elseif ($action === 'auto_assign') {
-        $rows = db_all("SELECT * FROM participants WHERE deleted_at IS NULL AND payment_status = 'FULLY_PAID' AND house_id IS NULL");
+        $rows = db_all("SELECT * FROM participants WHERE deleted_at IS NULL AND payment_status = 'FULLY_PAID' AND profile_completed = 1 AND house_id IS NULL");
         $assigned = 0;
         $failed = 0;
         foreach ($rows as $participant) {
@@ -476,9 +493,20 @@ function admin_report_export(): void
     $date = date('Y-m-d');
 
     if ($type === 'payments') {
-        $rows = db_all("SELECT pay.*, p.registration_id, p.surname, p.other_name FROM payments pay JOIN participants p ON p.id = pay.participant_id ORDER BY pay.id DESC");
-        csv_download("sb-osun-payments-{$date}.csv", ['Reference', 'Registration', 'Name', 'Amount', 'Type', 'Instalment', 'Status', 'Paid At'], array_map(
-            static fn(array $r): array => [$r['reference'], $r['registration_id'], $r['other_name'] . ' ' . $r['surname'], $r['amount'], $r['payment_type'], $r['installment_number'], $r['status'], $r['paid_at']],
+        $rows = db_all("SELECT pay.*, p.registration_id, p.surname, p.other_name, b.buyer_email, b.seats AS bulk_seats
+            FROM payments pay
+            LEFT JOIN participants p ON p.id = pay.participant_id
+            LEFT JOIN bulk_orders b ON b.id = pay.bulk_order_id
+            ORDER BY pay.id DESC");
+        csv_download("sb-osun-payments-{$date}.csv", ['Reference', 'Registration', 'Name', 'Buyer email', 'Seats', 'Amount', 'Type', 'Instalment', 'Status', 'Paid At'], array_map(
+            static fn(array $r): array => [
+                $r['reference'],
+                $r['registration_id'] ?: ($r['bulk_order_id'] ? 'BULK' : ''),
+                $r['registration_id'] ? ($r['other_name'] . ' ' . $r['surname']) : ($r['buyer_email'] ?: 'Bulk buyer'),
+                $r['buyer_email'] ?? '',
+                $r['bulk_seats'] ?? '',
+                $r['amount'], $r['payment_type'], $r['installment_number'], $r['status'], $r['paid_at'],
+            ],
             $rows
         ));
     }
@@ -614,7 +642,7 @@ function admin_settings_save(): void
     $fields = [
         'name', 'year', 'camp_start', 'camp_end', 'venue_name', 'venue_address',
         'early_bird_fee', 'flat_fee', 'early_bird_deadline', 'default_house_capacity',
-        'support_email', 'support_phone', 'payment_mode', 'payment_bank_name',
+        'support_email', 'support_phone', 'payment_bank_name',
         'payment_account_name', 'payment_account_number', 'payment_whatsapp',
     ];
     foreach ($fields as $field) {
@@ -692,6 +720,135 @@ function admin_newsletter_action(): void
         }
     }
     redirect_route('admin/newsletter');
+}
+
+/* ── Bulk orders ─────────────────────────────────────────────────────── */
+function admin_bulk(): void
+{
+    $admin = require_admin(['FINANCE_ADMIN', 'REGISTRATION_ADMIN', 'VIEWER']);
+    $orders = db_all(
+        "SELECT bo.*,
+            (SELECT COUNT(*) FROM bulk_tickets t WHERE t.bulk_order_id = bo.id) AS seats_total,
+            (SELECT COUNT(*) FROM bulk_tickets t WHERE t.bulk_order_id = bo.id AND t.used = 1) AS seats_done,
+            (SELECT COUNT(*) FROM payments pay WHERE pay.bulk_order_id = bo.id AND pay.status = 'VERIFIED') AS verified_payments
+         FROM bulk_orders bo ORDER BY bo.id DESC LIMIT 300"
+    );
+    $stats = [
+        'orders' => count_rows('bulk_orders'),
+        'paid'   => count_rows('bulk_orders', "status IN ('PAID','COMPLETED')"),
+        'seats'  => (int) db_value('SELECT COALESCE(SUM(seats),0) FROM bulk_orders', [], 0),
+        'done'   => (int) db_value('SELECT COUNT(*) FROM bulk_tickets WHERE used = 1', [], 0),
+    ];
+    view('admin/bulk', [
+        'title'  => 'Bulk orders',
+        'admin'  => $admin,
+        'orders' => $orders,
+        'stats'  => $stats,
+    ], 'admin/layout');
+}
+
+/* ── Read-only database viewer ───────────────────────────────────────── */
+function admin_database(): void
+{
+    admin_database_render();
+}
+
+function admin_database_query(): void
+{
+    require_admin(['SUPER_ADMIN']);
+    verify_csrf();
+    $sql = trim((string) post('sql'));
+    $result = ['sql' => $sql, 'rows' => [], 'columns' => [], 'error' => null];
+
+    if ($sql === '') {
+        $result['error'] = 'Enter a SELECT query.';
+    } elseif (!preg_match('/^(select|with)\b/i', $sql)) {
+        $result['error'] = 'Only read-only SELECT (or WITH … SELECT) queries are allowed.';
+    } elseif (preg_match('/;\s*\S/', $sql)) {
+        $result['error'] = 'Only a single statement is allowed.';
+    } elseif (preg_match('/\b(insert|update|delete|drop|alter|create|replace|attach|detach|pragma|vacuum|reindex|truncate)\b/i', $sql)) {
+        $result['error'] = 'Write, schema and administration statements are blocked in this viewer.';
+    } else {
+        try {
+            $sql = rtrim($sql, " \t\n\r;");
+            if (!preg_match('/\blimit\b/i', $sql)) {
+                $sql .= ' LIMIT 200';
+            }
+            $stmt = db()->query($sql);
+            $rows = [];
+            if ($stmt) {
+                while ($row = $stmt->fetch()) {
+                    foreach ($row as $column => $value) {
+                        if (stripos((string) $column, 'password') !== false) {
+                            $row[$column] = '[password hash hidden]';
+                        }
+                    }
+                    $rows[] = $row;
+                    if (count($rows) >= 200) {
+                        break;
+                    }
+                }
+            }
+            $result['rows'] = $rows;
+            $result['columns'] = $rows ? array_keys($rows[0]) : [];
+            $result['sql'] = $sql;
+            audit('DB_QUERY', 'database', 'read-only', null, ['sql' => mb_substr($sql, 0, 500), 'rows' => count($rows)]);
+        } catch (Throwable $e) {
+            $result['error'] = $e->getMessage();
+        }
+    }
+
+    admin_database_render($result);
+}
+
+function admin_database_render(?array $queryResult = null): void
+{
+    $admin = require_admin(['SUPER_ADMIN']);
+    $tables = db_tables();
+    $selected = trim((string) request('table', ''));
+    if ($selected !== '' && !in_array($selected, $tables, true)) {
+        $selected = '';
+    }
+    if ($selected === '' && $queryResult === null) {
+        $selected = in_array('participants', $tables, true) ? 'participants' : ($tables[0] ?? '');
+    }
+
+    $rows = [];
+    $total = 0;
+    $page = 1;
+    $pages = 1;
+    $columnsMeta = [];
+    $perPage = 40;
+    if ($selected !== '') {
+        $columnsMeta = db_table_columns($selected);
+        $total = db_table_row_count($selected);
+        $page = max(1, (int) request('page', 1));
+        $pages = max(1, (int) ceil($total / $perPage));
+        $page = min($page, $pages);
+        $offset = ($page - 1) * $perPage;
+        $rows = db_all("SELECT * FROM {$selected} LIMIT {$perPage} OFFSET {$offset}");
+        foreach ($rows as &$row) {
+            foreach ($row as $column => $value) {
+                if (stripos((string) $column, 'password') !== false) {
+                    $row[$column] = '[password hash hidden]';
+                }
+            }
+        }
+        unset($row);
+    }
+
+    view('admin/database', [
+        'title'       => 'Database viewer',
+        'admin'       => $admin,
+        'tables'      => $tables,
+        'selected'    => $selected,
+        'rows'        => $rows,
+        'columnsMeta' => $columnsMeta,
+        'total'       => $total,
+        'page'        => $page,
+        'pages'       => $pages,
+        'queryResult' => $queryResult,
+    ], 'admin/layout');
 }
 
 /* ── CSV helper ──────────────────────────────────────────────────────── */

@@ -57,8 +57,14 @@ $query = $_GET; unset($query['r']);
         <?php foreach ($rows as $p): ?>
           <tr>
             <td class="mono small"><?= e($p['reference']) ?><div class="sub"><?= e($p['provider_reference'] ?: '') ?></div></td>
-            <td><div class="name"><?= e($p['other_name'] . ' ' . $p['surname']) ?></div><div class="sub"><?= e($p['registration_id']) ?> · <?= e($p['zone']) ?></div></td>
-            <td class="small"><?= e($p['payment_type'] === 'FULL' ? 'Full' : 'Instalment ' . $p['installment_number'] . '/' . INSTALLMENT_COUNT) ?><div class="sub"><?= e($p['plan_rate']) ?></div></td>
+            <td>
+              <?php if (!empty($p['bulk_order_id'])): ?>
+                <div class="name">Bulk order</div><div class="sub"><?= e($p['buyer_email'] ?: 'Bulk buyer') ?> · <?= (int) ($p['bulk_seats'] ?? 0) ?> seats</div>
+              <?php else: ?>
+                <div class="name"><?= e(delegate_name($p)) ?></div><div class="sub"><?= e($p['registration_id'] ?: '—') ?> · <?= e($p['zone'] ?: 'Profile pending') ?></div>
+              <?php endif; ?>
+            </td>
+            <td class="small"><?= e($p['payment_type'] === 'FULL' ? 'Full' : ($p['payment_type'] === 'BULK' ? 'Bulk · ' . (int) ($p['bulk_seats'] ?? 0) . ' seats' : 'Instalment ' . $p['installment_number'] . '/' . INSTALLMENT_COUNT)) ?><div class="sub"><?= e($p['plan_rate']) ?></div></td>
             <td style="font-weight:800;white-space:nowrap"><?= money((int) $p['amount']) ?></td>
             <td><span class="<?= e(badge_class($p['status'])) ?>"><?= e($p['status']) ?></span></td>
             <td class="small"><?= e($p['provider']) ?></td>

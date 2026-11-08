@@ -33,7 +33,7 @@
   <div class="checkin-card" style="margin-bottom:12px">
     <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start">
       <div>
-        <h3><?= e($r['other_name'] . ' ' . $r['surname']) ?></h3>
+        <h3><?= e(delegate_name($r)) ?></h3>
         <p class="small" style="color:var(--sage)"><?= e($r['registration_id']) ?> · <?= e($r['class_name'] ?? 'No class') ?> · <?= e($r['house_name'] ?? 'No house') ?></p>
       </div>
       <span class="<?= e(badge_class($r['payment_status'])) ?>"><?= e(payment_status_label($r['payment_status'])) ?></span>
@@ -57,10 +57,12 @@
           </form>
         </details>
       <?php endif; ?>
+    <?php elseif ((int) ($r['profile_completed'] ?? 0) !== 1): ?>
+      <p class="notice notice-red">Delegate details incomplete — cannot be checked in yet.</p>
     <?php elseif ($r['payment_status'] !== 'FULLY_PAID'): ?>
       <p class="notice notice-red">Payment not completed — cannot be checked in.</p>
     <?php else: ?>
-      <form method="post" action="<?= e(url('admin/check-in/action')) ?>" style="margin-top:10px" data-confirm="Check in <?= e($r['other_name'] . ' ' . $r['surname']) ?>?">
+      <form method="post" action="<?= e(url('admin/check-in/action')) ?>" style="margin-top:10px" data-confirm="Check in <?= e(delegate_name($r)) ?>?">
         <?= csrf_field() ?>
         <input type="hidden" name="action" value="check_in">
         <input type="hidden" name="participant_id" value="<?= (int) $r['id'] ?>">
@@ -76,7 +78,7 @@
     <h2>Recent arrivals</h2>
     <?php if (!$recent): ?><p class="empty">No one has checked in yet.</p><?php else: ?>
       <?php foreach ($recent as $r): ?>
-        <div class="kv"><span><?= e($r['other_name'] . ' ' . $r['surname']) ?> <span class="mono small">(<?= e($r['registration_id']) ?>)</span></span><span><?= e(nice_date($r['check_in_time'], 'g:ia')) ?></span></div>
+        <div class="kv"><span><?= e(delegate_name($r)) ?> <span class="mono small">(<?= e($r['registration_id']) ?>)</span></span><span><?= e(nice_date($r['check_in_time'], 'g:ia')) ?></span></div>
       <?php endforeach; ?>
     <?php endif; ?>
   </section>

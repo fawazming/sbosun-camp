@@ -155,6 +155,7 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
             is_minor INT NOT NULL DEFAULT 0,
             guardian_name VARCHAR(191) NULL,
             guardian_contact VARCHAR(191) NULL,
+            profile_completed INT NOT NULL DEFAULT 0,
             payment_status VARCHAR(32) NOT NULL DEFAULT 'NOT_PAID',
             attendance_status VARCHAR(32) NOT NULL DEFAULT 'NOT_ARRIVED',
             house_id INT NULL,
@@ -166,7 +167,8 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
         )",
         "CREATE TABLE IF NOT EXISTS payments (
             id {$pk},
-            participant_id INT NOT NULL,
+            participant_id INT NOT NULL DEFAULT 0,
+            bulk_order_id INT NULL,
             reference VARCHAR(191) NOT NULL UNIQUE,
             provider_reference VARCHAR(191) NULL,
             amount INT NOT NULL,
@@ -184,6 +186,30 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
             failure_reason VARCHAR(255) NULL,
             created_at DATETIME NOT NULL,
             updated_at DATETIME NULL
+        )",
+        "CREATE TABLE IF NOT EXISTS bulk_orders (
+            id {$pk},
+            token VARCHAR(64) NOT NULL UNIQUE,
+            reference VARCHAR(191) NULL,
+            buyer_email VARCHAR(191) NOT NULL,
+            buyer_phone VARCHAR(32) NOT NULL,
+            seats INT NOT NULL,
+            amount INT NOT NULL,
+            status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+            created_at DATETIME NOT NULL,
+            paid_at DATETIME NULL,
+            updated_at DATETIME NULL
+        )",
+        "CREATE TABLE IF NOT EXISTS bulk_tickets (
+            id {$pk},
+            bulk_order_id INT NOT NULL,
+            token VARCHAR(64) NOT NULL UNIQUE,
+            category VARCHAR(64) NOT NULL,
+            price INT NOT NULL,
+            used INT NOT NULL DEFAULT 0,
+            participant_id INT NULL,
+            used_at DATETIME NULL,
+            created_at DATETIME NOT NULL
         )",
         "CREATE TABLE IF NOT EXISTS payment_events (
             id {$pk},
@@ -257,6 +283,19 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
         $pdo->exec($sql);
     }
 
+    /* ── Lightweight in-place upgrades for existing databases ── */
+    $requiredColumns = [
+        'participants' => ['profile_completed' => 'INT NOT NULL DEFAULT 1'],
+        'payments'     => ['bulk_order_id' => 'INT NULL'],
+    ];
+    foreach ($requiredColumns as $table => $columns) {
+        foreach ($columns as $column => $definition) {
+            if (!db_column_exists($table, $column)) {
+                $pdo->exec("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
+            }
+        }
+    }
+
     $indexes = [
         'CREATE INDEX idx_participants_reg ON participants (registration_id)',
         'CREATE INDEX idx_participants_email ON participants (email)',
@@ -266,6 +305,9 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
         'CREATE INDEX idx_payments_participant ON payments (participant_id)',
         'CREATE INDEX idx_payments_status ON payments (status)',
         'CREATE INDEX idx_payments_account ON payments (virtual_account_number)',
+        'CREATE INDEX idx_payments_bulk ON payments (bulk_order_id)',
+        'CREATE INDEX idx_bulk_tickets_order ON bulk_tickets (bulk_order_id)',
+        'CREATE INDEX idx_bulk_orders_ref ON bulk_orders (reference)',
         'CREATE INDEX idx_audit_created ON audit_logs (created_at)',
         'CREATE INDEX idx_newsletter_status ON newsletter (status)',
         'CREATE INDEX idx_login_attempt ON login_attempts (email, ip, attempted_at)',
@@ -345,4 +387,50 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
 function count_rows(string $table, string $where = '1=1', array $params = []): int
 {
     return (int) db_value("SELECT COUNT(*) FROM {$table} WHERE {$where}", $params, 0);
+}
+
+/* ── Schema introspection (used by the installer and the admin DB viewer) ── */
+function db_column_exists(string $table, string $column): bool
+{
+    try {
+        if (($GLOBALS['config']['db']['driver'] ?? 'sqlite') === 'sqlite') {
+            foreach (db_all("PRAGMA table_info({$table})") as $row) {
+                if (($row['name'] ?? '') === $column) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return db_one("SHOW COLUMNS FROM {$table} LIKE " . db()->quote($column)) !== null;
+    } catch (Throwable) {
+        return false;
+    }
+}
+
+function db_tables(): array
+{
+    if (($GLOBALS['config']['db']['driver'] ?? 'sqlite') === 'sqlite') {
+        return array_map(
+            static fn(array $r): string => (string) $r['name'],
+            db_all("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        );
+    }
+    return array_map(static fn(array $r): string => (string) array_values($r)[0], db_all('SHOW TABLES'));
+}
+
+function db_table_columns(string $table): array
+{
+    if (($GLOBALS['config']['db']['driver'] ?? 'sqlite') === 'sqlite') {
+        return db_all("PRAGMA table_info({$table})");
+    }
+    return db_all("SHOW COLUMNS FROM {$table}");
+}
+
+function db_table_row_count(string $table): int
+{
+    try {
+        return (int) db_value("SELECT COUNT(*) FROM {$table}", [], 0);
+    } catch (Throwable) {
+        return 0;
+    }
 }

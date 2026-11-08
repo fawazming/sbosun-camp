@@ -17,6 +17,7 @@ $nav = [
     ['admin/dashboard', 'Dashboard', '▦'],
     ['admin/participants', 'Participants', '☷'],
     ['admin/payments', 'Payments', '₦'],
+    ['admin/bulk', 'Bulk orders', '⧉'],
     ['admin/check-in', 'Check-in mode', '✓'],
     ['admin/houses', 'Houses', '⌂'],
     ['admin/reports', 'Reports', '⇩'],
@@ -24,6 +25,7 @@ $nav = [
     ['admin/users', 'Admin users', '⚙'],
     ['admin/settings', 'Settings', '☰'],
     ['admin/audit', 'Audit log', '≣'],
+    ['admin/database', 'Database', '⛁'],
 ];
 $visible = static function (string $route) use ($admin): bool {
     if (!$admin) return false;
@@ -32,8 +34,10 @@ $visible = static function (string $route) use ($admin): bool {
         'admin/users', 'admin/settings', 'admin/audit' => false,
         'admin/check-in' => in_array($admin['role'], ['ATTENDANCE_ADMIN', 'REGISTRATION_ADMIN', 'VIEWER'], true),
         'admin/payments' => in_array($admin['role'], ['FINANCE_ADMIN', 'VIEWER', 'REGISTRATION_ADMIN'], true),
+        'admin/bulk' => in_array($admin['role'], ['FINANCE_ADMIN', 'VIEWER', 'REGISTRATION_ADMIN'], true),
         'admin/houses' => in_array($admin['role'], ['HOUSE_ADMIN', 'REGISTRATION_ADMIN', 'VIEWER'], true),
         'admin/newsletter' => in_array($admin['role'], ['REGISTRATION_ADMIN', 'VIEWER'], true),
+        'admin/database' => false,
         default => true,
     };
 };

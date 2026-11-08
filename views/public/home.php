@@ -62,6 +62,7 @@ $lecturers = [
         <p class="hero-meta"><?= e($campDates) ?> · <?= e($venue) ?>, <?= e($venueAddress) ?></p>
         <div class="hero-actions">
           <a class="btn btn-gold" href="<?= e(url('register')) ?>">Register for Camp</a>
+          <a class="btn btn-outline" href="<?= e(url('bulk')) ?>">Bulk tickets</a>
           <a class="btn btn-outline" href="#classes">Learn More</a>
           <a class="btn btn-outline" href="<?= e(url('event.ics')) ?>" title="Add camp dates to your calendar">＋ Calendar</a>
         </div>
@@ -306,6 +307,7 @@ $lecturers = [
           <h2>Register before <?= e($deadline) ?> to lock in the early-bird rate.</h2>
           <p>After that, registration stays open right up to camp — just at the flat rate. Every fee covers accommodation, feeding and welfare for all five days.</p>
           <a class="btn btn-gold" style="margin-top:16px" href="<?= e(url('register')) ?>">Start Registration</a>
+          <a class="btn btn-outline" style="margin-top:16px;margin-left:8px" href="<?= e(url('bulk')) ?>">Buy group tickets</a>
           <a class="btn btn-outline" style="margin-top:16px;margin-left:8px" href="<?= e(url('status')) ?>">Find my registration</a>
         </div>
         <div class="price-pair">

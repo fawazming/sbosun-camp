@@ -85,8 +85,8 @@ foreach ($byZone as $z) { $maxZone = max($maxZone, (int) $z['total']); }
     <h2>Pending payments</h2>
     <?php if (!$pending): ?><p class="empty">Nothing pending.</p><?php else: foreach ($pending as $p): ?>
       <div style="border-bottom:1px solid #f1f5f0;padding:7px 0">
-        <div style="display:flex;justify-content:space-between;gap:8px;font-size:11.5px;font-weight:800"><span><?= e($p['other_name'] . ' ' . $p['surname']) ?></span><span><?= money((int) $p['amount']) ?></span></div>
-        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted)"><span><?= e($p['registration_id']) ?> · <?= e($p['payment_type'] === 'FULL' ? 'Full' : 'Instalment ' . $p['installment_number']) ?></span><span><?= e(nice_date($p['created_at'], 'j M')) ?></span></div>
+        <div style="display:flex;justify-content:space-between;gap:8px;font-size:11.5px;font-weight:800"><span><?= e(!empty($p['bulk_order_id']) ? 'Bulk · ' . ($p['buyer_email'] ?: 'buyer') : delegate_name($p)) ?></span><span><?= money((int) $p['amount']) ?></span></div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted)"><span><?= e(!empty($p['bulk_order_id']) ? ((int) ($p['bulk_seats'] ?? 0)) . ' seats' : ($p['registration_id'] ?: 'Profile pending')) ?> · <?= e($p['payment_type'] === 'FULL' ? 'Full' : ($p['payment_type'] === 'BULK' ? 'Bulk' : 'Instalment ' . $p['installment_number'])) ?></span><span><?= e(nice_date($p['created_at'], 'j M')) ?></span></div>
       </div>
     <?php endforeach; ?><a class="btn btn-outline-green btn-sm" style="margin-top:10px" href="<?= e(url('admin/payments', ['status' => 'PENDING'])) ?>">Review payments</a><?php endif; ?>
   </section>
@@ -104,7 +104,7 @@ foreach ($byZone as $z) { $maxZone = max($maxZone, (int) $z['total']); }
       <?php if (!$recent): ?><tr><td colspan="7" class="empty">No registrations yet. Share the camp registration page to get started.</td></tr><?php endif; ?>
       <?php foreach ($recent as $r): ?>
         <tr data-row-href="<?= e(url('admin/participants/' . $r['id'])) ?>">
-          <td><div class="name"><?= e($r['other_name'] . ' ' . $r['surname']) ?></div><div class="sub mono"><?= e($r['registration_id']) ?></div></td>
+          <td><div class="name"><?= e(delegate_name($r)) ?></div><div class="sub mono"><?= e($r['registration_id']) ?><?= (int) ($r['profile_completed'] ?? 0) === 0 ? ' · details pending' : '' ?></div></td>
           <td><?= e($r['category']) ?></td>
           <td><?= e($r['zone']) ?></td>
           <td><?= e($r['class_name'] ?? '—') ?></td>

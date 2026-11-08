@@ -237,6 +237,25 @@
     });
   });
 
+  /* Bulk order calculator */
+  $$('[data-bulk-form]').forEach((form) => {
+    const price = Number(form.getAttribute('data-price') || 0);
+    const inputs = $$('[data-bulk-qty]', form);
+    const seatsOut = $('[data-bulk-seats]', form.parentElement) || $('[data-bulk-seats]');
+    const totalOut = $('[data-bulk-total]', form.parentElement) || $('[data-bulk-total]');
+    const update = () => {
+      let seats = 0;
+      inputs.forEach((input) => {
+        const value = Math.max(0, Math.min(50, Number(input.value) || 0));
+        seats += value;
+      });
+      if (seatsOut) seatsOut.textContent = String(seats);
+      if (totalOut) totalOut.textContent = '₦' + (seats * price).toLocaleString('en-NG');
+    };
+    inputs.forEach((input) => input.addEventListener('input', update));
+    update();
+  });
+
   /* Newsletter AJAX */
   $$('[data-newsletter-form]').forEach((form) => {
     form.addEventListener('submit', async (e) => {

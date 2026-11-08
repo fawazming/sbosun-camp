@@ -4,16 +4,133 @@ declare(strict_types=1);
 const INSTALLMENT_COUNT = 10;
 
 /* ── Fees ────────────────────────────────────────────────────────────── */
-function fee_for(string $type, ?int $installment = null): array
+function verified_installment_count(int $participantId): int
+{
+    return (int) db_value(
+        "SELECT COUNT(*) FROM payments WHERE participant_id = ? AND payment_type = 'INSTALLMENT' AND status = 'VERIFIED'",
+        [$participantId],
+        0
+    );
+}
+
+function has_installment_plan(int $participantId): bool
+{
+    return (int) db_value(
+        "SELECT COUNT(*) FROM payments WHERE participant_id = ? AND payment_type = 'INSTALLMENT' AND status IN ('PENDING','VERIFIED')",
+        [$participantId],
+        0
+    ) > 0;
+}
+
+function participant_owed(array $participant): int
+{
+    $paid = participant_paid((int) $participant['id']);
+
+    // A full payment locks in the price that was actually charged. Later
+    // general-price changes must never create a new balance for a paid delegate.
+    $full = db_one(
+        "SELECT plan_rate, amount FROM payments
+         WHERE participant_id = ? AND payment_type = 'FULL' AND status = 'VERIFIED'
+         ORDER BY id LIMIT 1",
+        [$participant['id']]
+    );
+    if ($full) {
+        return max($paid, (int) $full['amount']);
+    }
+
+    // Instalment plans adapt to the current general price. Existing plans may
+    // continue after the early-bird deadline at the flat rate; new plans cannot.
+    if (has_installment_plan((int) $participant['id'])) {
+        return phase() === 'FLAT'
+            ? (int) setting('flat_fee', 12000)
+            : (int) setting('early_bird_fee', 8500);
+    }
+
+    return current_fee();
+}
+
+/**
+ * Quotes the next instalment from the real remaining balance, not by
+ * repeatedly dividing the old price. This is what makes a plan adjust safely
+ * when an admin changes the general camp fee or when early bird lapses.
+ */
+function installment_quote(array $participant): ?array
+{
+    $total = participant_owed($participant);
+    $paid = participant_paid((int) $participant['id']);
+    $balance = max(0, $total - $paid);
+    if ($balance <= 0) {
+        return null;
+    }
+
+    $verified = verified_installment_count((int) $participant['id']);
+    $started = has_installment_plan((int) $participant['id']);
+    if (!$started && phase() !== 'EARLY_BIRD') {
+        return null;
+    }
+    if ($verified >= INSTALLMENT_COUNT) {
+        return null;
+    }
+
+    $slotsLeft = max(1, INSTALLMENT_COUNT - $verified);
+    $amount = $slotsLeft === 1 ? $balance : max(1, intdiv($balance, $slotsLeft));
+    $amount = min($amount, $balance);
+
+    return [
+        'amount'      => $amount,
+        'slot'        => min($verified + 1, INSTALLMENT_COUNT),
+        'slots_left'  => $slotsLeft,
+        'balance'     => $balance,
+        'total'       => $total,
+        'started'     => $started,
+        'plan_rate'   => phase() === 'EARLY_BIRD' ? 'EARLY_BIRD' : 'FLAT',
+    ];
+}
+
+function fee_for(string $type, ?int $installment = null, ?array $participant = null): array
 {
     $isEarly = phase() === 'EARLY_BIRD';
     $planRate = $isEarly ? 'EARLY_BIRD' : 'FLAT';
-    $total = $isEarly
-        ? (int) setting('early_bird_fee', 8500)
-        : (int) setting('flat_fee', 12000);
 
+    if ($participant !== null) {
+        $total = participant_owed($participant);
+        $paid = participant_paid((int) $participant['id']);
+        $balance = max(0, $total - $paid);
+
+        if ($type === 'FULL') {
+            if ($balance <= 0) {
+                throw new RuntimeException('This registration is already fully paid.');
+            }
+            return [
+                'plan_rate' => $planRate,
+                'amount'    => $balance,
+                'total_fee' => $total,
+                'balance'   => $balance,
+            ];
+        }
+
+        $quote = installment_quote($participant);
+        if ($quote === null) {
+            throw new RuntimeException(
+                $isEarly
+                    ? 'There is no outstanding balance to pay by instalment.'
+                    : 'The instalment plan is only available before the early-bird deadline.'
+            );
+        }
+        return [
+            'plan_rate'   => $quote['plan_rate'],
+            'amount'      => $quote['amount'],
+            'total_fee'   => $quote['total'],
+            'balance'     => $quote['balance'],
+            'installment' => $quote['slot'],
+            'slots_left'  => $quote['slots_left'],
+        ];
+    }
+
+    // Generic quote (used for bulk seats).
+    $total = current_fee();
     if ($type === 'FULL') {
-        return ['plan_rate' => $planRate, 'amount' => $total, 'total_fee' => $total];
+        return ['plan_rate' => $planRate, 'amount' => $total, 'total_fee' => $total, 'balance' => $total];
     }
 
     if (!$isEarly) {
@@ -25,23 +142,13 @@ function fee_for(string $type, ?int $installment = null): array
     }
     $base = (int) round($total / INSTALLMENT_COUNT);
     $amount = $n < INSTALLMENT_COUNT ? $base : $total - ($base * (INSTALLMENT_COUNT - 1));
-    return ['plan_rate' => $planRate, 'amount' => $amount, 'total_fee' => $total];
-}
-
-function participant_owed(array $participant): int
-{
-    $startedEarly = (int) db_value(
-        "SELECT COUNT(*) FROM payments WHERE participant_id = ? AND plan_rate = 'EARLY_BIRD'",
-        [$participant['id']],
-        0
-    ) > 0;
-
-    if ($startedEarly) {
-        return phase() === 'FLAT'
-            ? (int) setting('flat_fee', 12000)
-            : (int) setting('early_bird_fee', 8500);
-    }
-    return current_fee();
+    return [
+        'plan_rate'   => $planRate,
+        'amount'      => $amount,
+        'total_fee'   => $total,
+        'balance'     => $total,
+        'installment' => $n,
+    ];
 }
 
 function participant_paid(int $participantId): int
@@ -77,7 +184,7 @@ function refresh_participant_payment(int $participantId): array
         'updated_at'     => now(),
     ], 'id = ?', [$participantId]);
 
-    if ($status === 'FULLY_PAID' && empty($participant['house_id'])) {
+    if ($status === 'FULLY_PAID' && empty($participant['house_id']) && (int) ($participant['profile_completed'] ?? 0) === 1) {
         auto_assign_house($participantId, (string) $participant['gender']);
     }
 
@@ -125,6 +232,9 @@ function check_in_participant(int $participantId, string $adminName): array
     if (!$participant) {
         return [false, 'Participant not found.'];
     }
+    if ((int) ($participant['profile_completed'] ?? 0) !== 1) {
+        return [false, 'This delegate has not completed their registration form yet.'];
+    }
     if ($participant['payment_status'] !== 'FULLY_PAID') {
         return [false, 'Payment is not complete — this delegate cannot be checked in.'];
     }
@@ -167,7 +277,8 @@ function undo_check_in(int $participantId, string $adminName, string $reason): a
 /* ── Payment initiation ──────────────────────────────────────────────── */
 function payment_mode(): string
 {
-    $mode = (string) setting('payment_mode', config('payment.mode', 'mock'));
+    // The .env PAYMENT_MODE is the single switch. Mock is only used locally.
+    $mode = strtolower(trim((string) config('payment.mode', 'mock')));
     return in_array($mode, ['mock', 'manual', 'hosted'], true) ? $mode : 'mock';
 }
 
@@ -180,8 +291,8 @@ function start_payment(array $participant, string $type, ?int $installment = nul
         throw new RuntimeException('Choose a valid payment option.');
     }
 
-    $fee = fee_for($type, $installment);
-    $slot = $type === 'INSTALLMENT' ? (int) $installment : null;
+    $fee = fee_for($type, $installment, $participant);
+    $slot = $type === 'INSTALLMENT' ? (int) ($fee['installment'] ?? $installment) : null;
 
     $existing = null;
     if ($slot === null) {
@@ -285,6 +396,251 @@ function start_payment(array $participant, string $type, ?int $installment = nul
     ];
 }
 
+/**
+ * Keeps an unpaid payment in sync with the current quote. If a general price
+ * update changed the amount, mock/manual payment instructions are refreshed;
+ * a hosted checkout is retired so the delegate starts a correct new session.
+ */
+function reconcile_pending_payments(array $participant, ?array $quote, int $balance): void
+{
+    $pending = db_all(
+        "SELECT * FROM payments WHERE participant_id = ? AND status = 'PENDING'",
+        [$participant['id']]
+    );
+    if ($balance <= 0) {
+        foreach ($pending as $payment) {
+            mark_payment_failed($payment, 'Registration is already fully paid.');
+        }
+        return;
+    }
+    foreach ($pending as $payment) {
+        $expected = null;
+        if ($payment['payment_type'] === 'INSTALLMENT' && $quote !== null
+            && (int) $payment['installment_number'] === (int) $quote['slot']) {
+            $expected = (int) $quote['amount'];
+        } elseif ($payment['payment_type'] === 'FULL' && $balance > 0) {
+            $expected = $balance;
+        }
+        if ($expected === null || $expected === (int) $payment['amount']) {
+            continue;
+        }
+        if ($payment['provider'] === 'payvessel') {
+            mark_payment_failed($payment, 'Superseded by a price or plan update; start a new checkout.');
+            audit('SUPERSEDE_PAYMENT', 'payment', (string) $payment['reference'], ['amount' => (int) $payment['amount']], ['amount' => $expected]);
+            continue;
+        }
+        db_update('payments', ['amount' => $expected, 'updated_at' => now()], 'id = ? AND status = ?', [$payment['id'], 'PENDING']);
+        audit('RECALCULATE_PAYMENT', 'payment', (string) $payment['reference'], ['amount' => (int) $payment['amount']], ['amount' => $expected]);
+    }
+}
+
+/* ── Bulk orders ─────────────────────────────────────────────────────── */
+function bulk_order_by_token(string $token): ?array
+{
+    return db_one('SELECT * FROM bulk_orders WHERE token = ?', [$token]);
+}
+
+function bulk_tickets(int $orderId): array
+{
+    return db_all(
+        'SELECT bt.*, p.registration_id, p.surname, p.other_name
+         FROM bulk_tickets bt LEFT JOIN participants p ON p.id = bt.participant_id
+         WHERE bt.bulk_order_id = ? ORDER BY bt.id',
+        [$orderId]
+    );
+}
+
+function create_bulk_order(string $email, string $phone, array $cart): array
+{
+    $email = strtolower(trim($email));
+    $phone = trim($phone);
+    if (!valid_email($email)) {
+        throw new RuntimeException('Enter a valid email address for the ticket buyer.');
+    }
+    if (!valid_phone($phone)) {
+        throw new RuntimeException('Enter a valid phone number for the ticket buyer.');
+    }
+
+    $clean = [];
+    foreach ($cart as $category => $qty) {
+        $qty = (int) $qty;
+        if ($qty <= 0) {
+            continue;
+        }
+        if (!in_array($category, categories(), true)) {
+            throw new RuntimeException('One of the selected categories is not valid.');
+        }
+        $clean[$category] = min(50, $qty);
+    }
+    $seats = array_sum($clean);
+    if ($seats < 1) {
+        throw new RuntimeException('Add at least one seat to your bulk order.');
+    }
+    if ($seats > 50) {
+        throw new RuntimeException('A single bulk order is limited to 50 seats.');
+    }
+
+    $price = current_fee();
+    $amount = $price * $seats;
+    $token = random_token(24);
+
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        $orderId = db_insert('bulk_orders', [
+            'token'       => $token,
+            'reference'   => null,
+            'buyer_email' => $email,
+            'buyer_phone' => $phone,
+            'seats'       => $seats,
+            'amount'      => $amount,
+            'status'      => 'PENDING',
+            'created_at'  => now(),
+            'updated_at'  => now(),
+        ]);
+
+        foreach ($clean as $category => $qty) {
+            for ($i = 0; $i < $qty; $i++) {
+                db_insert('bulk_tickets', [
+                    'bulk_order_id' => $orderId,
+                    'token'         => random_token(24),
+                    'category'      => $category,
+                    'price'         => $price,
+                    'used'          => 0,
+                    'created_at'    => now(),
+                ]);
+            }
+        }
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
+
+    audit('CREATE_BULK_ORDER', 'bulk_order', (string) $orderId, null, [
+        'seats' => $seats, 'amount' => $amount, 'email' => $email,
+    ]);
+
+    return db_one('SELECT * FROM bulk_orders WHERE id = ?', [$orderId]);
+}
+
+function start_bulk_payment(array $order): array
+{
+    if ($order['status'] !== 'PENDING') {
+        throw new RuntimeException('This bulk order is already paid.');
+    }
+
+    $existing = db_one(
+        "SELECT * FROM payments WHERE bulk_order_id = ? AND status IN ('PENDING','FAILED') ORDER BY id DESC LIMIT 1",
+        [$order['id']]
+    );
+    $mode = payment_mode();
+    $reference = $existing['reference'] ?? ('SBHIC-BULK-' . strtoupper(bin2hex(random_bytes(6))));
+    $provider = $mode === 'manual' ? 'manual_transfer' : ($mode === 'hosted' ? 'payvessel' : 'mock');
+    $account = null;
+    $checkoutUrl = null;
+    $providerReference = $existing['provider_reference'] ?? null;
+
+    if ($mode === 'manual') {
+        $number = (string) setting('payment_account_number', config('payment.manual_account_no', ''));
+        $name = (string) setting('payment_account_name', config('payment.manual_account_name', ''));
+        if ($number === '' || $name === '') {
+            throw new RuntimeException('Manual payment account is not configured. Add it in Admin → Settings or .env.');
+        }
+        $account = [
+            'account_number' => $number,
+            'account_name'   => $name,
+            'bank_name'      => (string) setting('payment_bank_name', config('payment.manual_bank', '')),
+        ];
+    } elseif ($mode === 'hosted') {
+        $checkout = hosted_create_checkout([
+            'email'     => (string) $order['buyer_email'],
+            'amount'    => (int) $order['amount'],
+            'reference' => $reference,
+            'name'      => 'SB HIC Bulk Buyer',
+            'phone'     => (string) $order['buyer_phone'],
+        ]);
+        $checkoutUrl = $checkout['checkout_url'];
+        $providerReference = $checkout['reference'];
+        $account = ['account_number' => '', 'account_name' => '', 'bank_name' => (string) config('payment.provider', 'PayVessel')];
+    } else {
+        $account = mock_account($reference);
+    }
+
+    $data = [
+        'amount'                 => (int) $order['amount'],
+        'payment_type'           => 'BULK',
+        'installment_number'     => null,
+        'plan_rate'              => phase(),
+        'provider'               => $provider,
+        'status'                 => 'PENDING',
+        'virtual_account_number' => $account['account_number'] ?: null,
+        'account_name'           => $account['account_name'] ?: null,
+        'bank_name'              => $account['bank_name'] ?: null,
+        'checkout_url'           => $checkoutUrl,
+        'provider_reference'     => $providerReference,
+        'bulk_order_id'          => (int) $order['id'],
+        'updated_at'             => now(),
+    ];
+    if ($existing) {
+        db_update('payments', $data, 'id = ?', [$existing['id']]);
+        $paymentId = (int) $existing['id'];
+    } else {
+        $data['participant_id'] = 0;
+        $data['reference'] = $reference;
+        $data['created_at'] = now();
+        $paymentId = db_insert('payments', $data);
+    }
+
+    db_update('bulk_orders', ['reference' => $reference, 'updated_at' => now()], 'id = ?', [$order['id']]);
+
+    audit('BULK_PAYMENT_INITIATED', 'bulk_order', (string) $order['id'], null, [
+        'amount' => (int) $order['amount'], 'mode' => $mode, 'reference' => $reference,
+    ]);
+
+    return [
+        'payment'  => db_one('SELECT * FROM payments WHERE id = ?', [$paymentId]),
+        'mode'     => $mode,
+        'account'  => $account,
+        'label'    => 'Bulk registration · ' . (int) $order['seats'] . ' seats',
+        'whatsapp' => $mode === 'manual' ? whatsapp_number() : null,
+    ];
+}
+
+function refresh_bulk_order(int $orderId): array
+{
+    $order = db_one('SELECT * FROM bulk_orders WHERE id = ?', [$orderId]);
+    if (!$order) {
+        return [];
+    }
+    $paid = (int) db_value(
+        "SELECT COALESCE(SUM(amount),0) FROM payments WHERE bulk_order_id = ? AND status = 'VERIFIED'",
+        [$orderId],
+        0
+    );
+    $used = (int) db_value('SELECT COUNT(*) FROM bulk_tickets WHERE bulk_order_id = ? AND used = 1', [$orderId], 0);
+    $seats = (int) $order['seats'];
+
+    if ($paid >= (int) $order['amount']) {
+        $status = $used >= $seats ? 'COMPLETED' : 'PAID';
+        db_update('bulk_orders', [
+            'status'     => $status,
+            'paid_at'    => $order['paid_at'] ?: now(),
+            'updated_at' => now(),
+        ], 'id = ?', [$orderId]);
+    } elseif ($paid > 0) {
+        db_update('bulk_orders', ['status' => 'PENDING', 'updated_at' => now()], 'id = ?', [$orderId]);
+    }
+    return db_one('SELECT * FROM bulk_orders WHERE id = ?', [$orderId]);
+}
+
+function bulk_order_status_label(string $status): string
+{
+    return ucwords(strtolower(str_replace('_', ' ', $status)));
+}
+
 function mock_account(string $reference): array
 {
     $digits = (string) (hexdec(substr(hash('sha1', $reference), 0, 7)) % 1000000000);
@@ -361,6 +717,23 @@ function mark_payment_verified(array $payment, string $providerReference, int $a
 
         record_payment_event($providerReference, (int) $fresh['id'], $amount, 'MATCHED', ['source' => $source]);
 
+        if (!empty($fresh['bulk_order_id'])) {
+            $order = refresh_bulk_order((int) $fresh['bulk_order_id']);
+            $pdo->commit();
+            audit('VERIFY_BULK_PAYMENT', 'bulk_order', (string) $fresh['bulk_order_id'], ['status' => $fresh['status']], [
+                'status' => 'VERIFIED', 'amount' => $amount, 'source' => $source,
+            ]);
+            if (($order['status'] ?? '') === 'PAID') {
+                send_bulk_confirmation($order);
+            }
+            return [
+                'ok' => true,
+                'result' => 'verified',
+                'message' => 'Bulk payment verified.',
+                'bulk_order' => $order,
+            ];
+        }
+
         $participant = refresh_participant_payment((int) $fresh['participant_id']);
         $pdo->commit();
 
@@ -372,7 +745,7 @@ function mark_payment_verified(array $payment, string $providerReference, int $a
             'payment'     => $participant['payment_status'] ?? '',
         ]);
 
-        if (($participant['payment_status'] ?? '') === 'FULLY_PAID') {
+        if (($participant['payment_status'] ?? '') === 'FULLY_PAID' && (int) ($participant['profile_completed'] ?? 0) === 1) {
             send_registration_confirmation($participant);
         }
 

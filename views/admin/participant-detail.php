@@ -1,7 +1,8 @@
 <?php
-$fullName = trim($participant['other_name'] . ' ' . $participant['surname']);
+$fullName = delegate_name($participant);
 $balance = max(0, (int) $participant['amount_owed'] - (int) $participant['amount_paid']);
 $isPresent = ($attendance['status'] ?? 'NOT_ARRIVED') === 'PRESENT';
+$profileComplete = (int) ($participant['profile_completed'] ?? 0) === 1;
 ?>
 <a class="admin-back" href="<?= e(url('admin/participants')) ?>">← Back to participants</a>
 <div class="admin-page-head" style="margin-top:8px">
@@ -15,8 +16,13 @@ $isPresent = ($attendance['status'] ?? 'NOT_ARRIVED') === 'PRESENT';
     <a class="btn btn-outline-green btn-sm" href="<?= e(url('portal/' . $participant['token'])) ?>" target="_blank" rel="noopener">Delegate portal ↗</a>
     <span class="<?= e(badge_class($participant['payment_status'])) ?>"><?= e(payment_status_label($participant['payment_status'])) ?></span>
     <span class="<?= e(badge_class($participant['attendance_status'])) ?>"><?= e($isPresent ? 'Present' : 'Not arrived') ?></span>
+    <?php if (!$profileComplete): ?><span class="badge badge-amber">Details pending</span><?php endif; ?>
   </div>
 </div>
+
+<?php if (!$profileComplete): ?>
+  <div class="notice notice-amber" style="margin-bottom:14px">This delegate has paid but has not completed the registration form. Their name, class/zone/phone fields and ID card will populate when they finish step 2. Check-in is blocked until then.</div>
+<?php endif; ?>
 
 <div class="admin-grid admin-grid-3">
   <section class="panel" style="grid-column:span 2">
@@ -55,7 +61,9 @@ $isPresent = ($attendance['status'] ?? 'NOT_ARRIVED') === 'PRESENT';
   <aside style="display:flex;flex-direction:column;gap:14px">
     <section class="panel">
       <h2>Check-in</h2>
-      <?php if ($isPresent): ?>
+      <?php if (!$profileComplete): ?>
+        <p class="notice notice-amber" style="margin-top:0">Not eligible yet — delegate details are incomplete.</p>
+      <?php elseif ($isPresent): ?>
         <p class="notice notice-green" style="margin-top:0">✓ Checked in <?= e(nice_datetime($attendance['check_in_time'])) ?> by <?= e($attendance['checked_in_by'] ?: 'staff') ?>.</p>
         <?php if ($admin['role'] !== 'VIEWER'): ?>
         <form method="post" action="<?= e(url('admin/participants/' . $participant['id'] . '/action')) ?>" data-confirm="Reverse this check-in? This is logged in the audit trail." style="margin-top:10px">

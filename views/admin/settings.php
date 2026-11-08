@@ -52,16 +52,10 @@ $endValue = date('Y-m-d', strtotime((string) setting('camp_end')));
     </section>
 
     <section class="panel">
-      <h2>Payment mode</h2>
-      <div class="field">
-        <label>How delegates pay</label>
-        <select class="select" name="payment_mode">
-          <option value="mock" <?= payment_mode() === 'mock' ? 'selected' : '' ?>>Mock / sandbox (testing only)</option>
-          <option value="manual" <?= payment_mode() === 'manual' ? 'selected' : '' ?>>Manual bank transfer + WhatsApp receipt</option>
-          <option value="hosted" <?= payment_mode() === 'hosted' ? 'selected' : '' ?>>Hosted checkout (PayVessel / PayFlow)</option>
-        </select>
-      </div>
-      <p class="small muted" style="margin-top:6px">Hosted mode uses the API keys in <span class="mono">.env</span> and verifies every payment server-side.</p>
+      <h2>Payment mode <span class="badge badge-slate">.env controlled</span></h2>
+      <div class="kv"><span>Active mode (PAYMENT_MODE)</span><span><span class="badge badge-<?= payment_mode() === 'mock' ? 'amber' : 'green' ?>"><?= e(payment_mode()) ?></span></span></div>
+      <div class="kv"><span>What this means</span><span class="small"><?= payment_mode() === 'mock' ? 'Sandbox checkout — no real money' : (payment_mode() === 'manual' ? 'Bank transfer + admin approval' : 'PayVessel / PayFlow hosted checkout') ?></span></div>
+      <p class="small muted" style="margin-top:8px">Change <span class="mono">PAYMENT_MODE=mock|manual|hosted</span> in <span class="mono">.env</span> to switch. Set <span class="mono">PAYMENT_MODE=hosted</span> with live keys for real payments. This screen cannot override the environment.</p>
 
       <h2 style="margin-top:16px">Manual transfer account</h2>
       <div class="form-grid">

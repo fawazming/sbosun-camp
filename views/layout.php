@@ -34,6 +34,7 @@ $registrationOpen = (string) setting('registration_open', '1') === '1' && (strin
         <a href="<?= e(url('home')) ?>#highlights">Camp life</a>
         <a href="<?= e(url('home')) ?>#gallery">Gallery</a>
         <a href="<?= e(url('home')) ?>#lecturers">Faculty</a>
+        <a href="<?= e(url('bulk')) ?>">Bulk tickets</a>
         <a href="<?= e(url('status')) ?>">Find registration</a>
       </nav>
       <div class="nav-actions">
@@ -46,6 +47,7 @@ $registrationOpen = (string) setting('registration_open', '1') === '1' && (strin
       <a href="<?= e(url('home')) ?>#highlights">Camp life</a>
       <a href="<?= e(url('home')) ?>#gallery">Gallery</a>
       <a href="<?= e(url('home')) ?>#lecturers">Faculty</a>
+      <a href="<?= e(url('bulk')) ?>">Bulk tickets</a>
       <a href="<?= e(url('status')) ?>">Find registration</a>
       <a href="<?= e(url('admin/login')) ?>">Admin sign in</a>
     </nav>

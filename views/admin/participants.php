@@ -62,7 +62,7 @@ $attendanceStatuses = ['NOT_ARRIVED', 'PRESENT'];
         <?php foreach ($rows as $p): ?>
           <tr data-row-href="<?= e(url('admin/participants/' . $p['id'])) ?>">
             <td class="mono small"><?= e($p['registration_id']) ?></td>
-            <td><div class="name"><?= e($p['other_name'] . ' ' . $p['surname']) ?></div><div class="sub"><?= e($p['phone']) ?></div></td>
+            <td><div class="name"><?= e(delegate_name($p)) ?></div><div class="sub"><?= e($p['phone']) ?><?= (int) ($p['profile_completed'] ?? 0) === 0 ? ' · details pending' : '' ?></div></td>
             <td><?= e($p['gender'] === 'MALE' ? 'Male' : 'Female') ?></td>
             <td class="small"><?= e($p['age_group']) ?></td>
             <td class="small"><?= e($p['category']) ?></td>

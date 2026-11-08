@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS participants (
   is_minor TINYINT NOT NULL DEFAULT 0,
   guardian_name VARCHAR(191) NULL,
   guardian_contact VARCHAR(191) NULL,
+  profile_completed TINYINT NOT NULL DEFAULT 0,
   payment_status VARCHAR(32) NOT NULL DEFAULT 'NOT_PAID',
   attendance_status VARCHAR(32) NOT NULL DEFAULT 'NOT_ARRIVED',
   house_id INT NULL,
@@ -59,9 +60,38 @@ CREATE TABLE IF NOT EXISTS participants (
   INDEX idx_participants_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS bulk_orders (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  token VARCHAR(64) NOT NULL UNIQUE,
+  reference VARCHAR(191) NULL,
+  buyer_email VARCHAR(191) NOT NULL,
+  buyer_phone VARCHAR(32) NOT NULL,
+  seats INT NOT NULL,
+  amount INT NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+  created_at DATETIME NOT NULL,
+  paid_at DATETIME NULL,
+  updated_at DATETIME NULL,
+  INDEX idx_bulk_orders_ref (reference)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS bulk_tickets (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  bulk_order_id INT NOT NULL,
+  token VARCHAR(64) NOT NULL UNIQUE,
+  category VARCHAR(64) NOT NULL,
+  price INT NOT NULL,
+  used TINYINT NOT NULL DEFAULT 0,
+  participant_id INT NULL,
+  used_at DATETIME NULL,
+  created_at DATETIME NOT NULL,
+  INDEX idx_bulk_tickets_order (bulk_order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS payments (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  participant_id INT NOT NULL,
+  participant_id INT NOT NULL DEFAULT 0,
+  bulk_order_id INT NULL,
   reference VARCHAR(191) NOT NULL UNIQUE,
   provider_reference VARCHAR(191) NULL,
   amount INT NOT NULL,
@@ -81,7 +111,8 @@ CREATE TABLE IF NOT EXISTS payments (
   updated_at DATETIME NULL,
   INDEX idx_payments_participant (participant_id),
   INDEX idx_payments_status (status),
-  INDEX idx_payments_account (virtual_account_number)
+  INDEX idx_payments_account (virtual_account_number),
+  INDEX idx_payments_bulk (bulk_order_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS payment_events (

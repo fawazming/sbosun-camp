@@ -196,6 +196,26 @@ function send_registration_confirmation(array $participant): void
     );
 }
 
+function send_bulk_confirmation(array $order): void
+{
+    if (!mail_configured()) {
+        return;
+    }
+    $tickets = bulk_tickets((int) $order['id']);
+    $portal = absolute_url('bulk/' . $order['token']);
+    $rows = '';
+    foreach ($tickets as $i => $ticket) {
+        $link = absolute_url('complete-ticket/' . $ticket['token']);
+        $rows .= '<tr><td style="padding:7px 8px;border-bottom:1px solid #eee">Seat ' . ($i + 1) . ' · ' . e($ticket['category']) . '</td>'
+            . '<td style="padding:7px 8px;border-bottom:1px solid #eee"><a href="' . e($link) . '">Complete details</a></td></tr>';
+    }
+    $body = '<p style="font-size:15px;line-height:1.6">Your bulk payment for <strong>' . (int) $order['seats'] . ' seat(s)</strong> has been confirmed.</p>'
+        . '<p style="font-size:14px;line-height:1.6">Share one unique link with each delegate. Each link can be completed exactly once.</p>'
+        . '<table cellpadding="0" cellspacing="0" style="width:100%;font-size:13px;border:1px solid #eee;border-radius:10px;margin:14px 0">' . $rows . '</table>'
+        . '<p style="font-size:14px">Buyer portal: <a href="' . e($portal) . '">' . e($portal) . '</a></p>';
+    send_mail((string) $order['buyer_email'], 'Bulk registration confirmed — ' . setting('name', 'SB HIC 2026'), email_layout('Your seats are ready', $body, 'Share the unique links with your delegates.'), strip_tags($body));
+}
+
 function send_newsletter_welcome(string $email, string $token): void
 {
     if (!mail_configured()) {

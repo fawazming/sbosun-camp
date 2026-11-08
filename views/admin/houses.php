@@ -53,7 +53,7 @@
     <?php foreach ($unassigned as $p): $options = array_values(array_filter($houses, static fn(array $h): bool => $h['gender'] === $p['gender'] && $h['status'] === 'ACTIVE' && ((int) $h['capacity'] > (int) $h['occupants']))); ?>
       <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid #f1f5f0;padding:9px 0">
         <div>
-          <p style="font-size:12.5px;font-weight:800"><?= e($p['other_name'] . ' ' . $p['surname']) ?></p>
+          <p style="font-size:12.5px;font-weight:800"><?= e(delegate_name($p)) ?></p>
           <p class="small muted"><?= e($p['registration_id']) ?> · <?= e($p['gender'] === 'MALE' ? 'Male' : 'Female') ?></p>
         </div>
         <form method="post" action="<?= e(url('admin/houses/action')) ?>" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">

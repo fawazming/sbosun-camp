@@ -339,6 +339,15 @@ function participant_by_token(string $token): ?array
     return db_one('SELECT * FROM participants WHERE token = ? AND deleted_at IS NULL', [$token]);
 }
 
+function delegate_name(array $participant, bool $fallbackEmail = true): string
+{
+    $name = trim(($participant['other_name'] ?? '') . ' ' . ($participant['surname'] ?? ''));
+    if ($name !== '') {
+        return $name;
+    }
+    return $fallbackEmail ? (string) ($participant['email'] ?? 'New delegate') : 'New delegate';
+}
+
 function payment_status_label(string $status): string
 {
     return ucwords(strtolower(str_replace('_', ' ', $status)));
