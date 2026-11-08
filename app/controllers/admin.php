@@ -309,6 +309,19 @@ function admin_payment_action(array $params): void
             $label = $payment['payment_type'] === 'BULK' ? 'Payment approved and bulk seat links unlocked.' : 'Payment approved and participant updated.';
             flash($result['ok'] ? 'success' : 'error', $result['ok'] ? $label : $result['message']);
         }
+    } elseif ($action === 'reverify') {
+        if ($payment['status'] !== 'PENDING') {
+            flash('error', 'Only pending payments can be re-verified.');
+        } elseif (($payment['provider'] ?? '') !== 'payvessel') {
+            flash('error', 'Only hosted gateway payments can be re-verified. Manual transfers are approved by an admin.');
+        } else {
+            $result = settle_payment_with_gateway($payment);
+            audit('REVERIFY_PAYMENT', 'payment', (string) $payment['reference'], ['status' => $payment['status']], [
+                'result' => $result['state'],
+                'admin'  => $admin['name'],
+            ]);
+            flash($result['state'] === 'verified' ? 'success' : ($result['state'] === 'failed' ? 'error' : 'info'), $result['message']);
+        }
     } elseif ($action === 'refund') {
         $reason = trim((string) post('reason'));
         if ($reason === '') {

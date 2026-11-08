@@ -34,6 +34,8 @@ require __DIR__ . '/auth.php';
 require __DIR__ . '/payments.php';
 require __DIR__ . '/mailer.php';
 
+ensure_payment_schema();
+
 /* ── Session ─────────────────────────────────────────────────────────── */
 if (session_status() !== PHP_SESSION_ACTIVE) {
     session_name($GLOBALS['config']['security']['session_name']);

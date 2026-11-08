@@ -199,12 +199,13 @@ function submit_register(): void
         redirect_route('portal/' . $participant['token']);
     }
 
-    if ($started['mode'] === 'mock') {
-        redirect_route('pay/mock/' . $started['payment']['reference']);
+    $checkout = payment_checkout_redirect($started);
+    if ($checkout !== null) {
+        redirect($checkout);
     }
-    if ($started['mode'] === 'hosted' && $started['payment']['checkout_url']) {
-        header('Location: ' . $started['payment']['checkout_url']);
-        exit;
+    if ($started['mode'] === 'hosted') {
+        flash('error', 'The payment service returned an invalid checkout link. Please try again from your portal.');
+        redirect_route('status');
     }
     flash('success', 'Almost there — complete the transfer below. Your delegate form unlocks after payment is confirmed.');
     redirect_route('portal/' . $participant['token'], ['pay' => $started['payment']['reference']]);
@@ -220,6 +221,12 @@ function page_complete(array $params): void
     }
     if ((int) ($participant['profile_completed'] ?? 0) === 1) {
         redirect_route('portal/' . $participant['token']);
+    }
+    if (!has_verified_payment((int) $participant['id'])) {
+        // The buyer may have closed the gateway tab. Re-run verification on
+        // demand instead of assuming the payment failed.
+        reverify_participant_payments((int) $participant['id']);
+        $participant = db_one('SELECT * FROM participants WHERE id = ?', [$participant['id']]) ?? $participant;
     }
     if (!has_verified_payment((int) $participant['id'])) {
         flash('error', 'Complete payment first. Your delegate form unlocks as soon as payment is confirmed.');
@@ -319,6 +326,9 @@ function page_portal(array $params): void
         view('errors/404', ['title' => 'Registration not found'], 'layout');
         return;
     }
+    // Recover payments whose browser callback never arrived.
+    reverify_participant_payments((int) $participant['id']);
+    $participant = db_one('SELECT * FROM participants WHERE id = ?', [$participant['id']]) ?? $participant;
     ensure_attendance((int) $participant['id']);
     $class = $participant['class_id'] ? db_one('SELECT * FROM classes WHERE id = ?', [$participant['class_id']]) : null;
     $house = $participant['house_id'] ? db_one('SELECT * FROM houses WHERE id = ?', [$participant['house_id']]) : null;
@@ -402,12 +412,13 @@ function submit_bulk_register(): void
         redirect_route($order ? 'bulk/' . $order['token'] : 'bulk');
     }
 
-    if ($started['mode'] === 'mock') {
-        redirect_route('pay/mock/' . $started['payment']['reference']);
+    $checkout = payment_checkout_redirect($started);
+    if ($checkout !== null) {
+        redirect($checkout);
     }
-    if ($started['mode'] === 'hosted' && $started['payment']['checkout_url']) {
-        header('Location: ' . $started['payment']['checkout_url']);
-        exit;
+    if ($started['mode'] === 'hosted') {
+        flash('error', 'The payment service returned an invalid checkout link. Please try again from your portal.');
+        redirect_route('status');
     }
     flash('success', 'Bulk order created. Complete the transfer below — your seat links unlock after payment.');
     redirect_route('bulk/' . $order['token'], ['pay' => $started['payment']['reference']]);
@@ -421,6 +432,9 @@ function page_bulk_portal(array $params): void
         view('errors/404', ['title' => 'Bulk order not found'], 'layout');
         return;
     }
+    // Recover bulk payments whose browser callback never arrived.
+    reverify_bulk_payments((int) $order['id']);
+    $order = db_one('SELECT * FROM bulk_orders WHERE id = ?', [$order['id']]) ?? $order;
     $tickets = bulk_tickets((int) $order['id']);
     $payments = db_all('SELECT * FROM payments WHERE bulk_order_id = ? ORDER BY id DESC', [$order['id']]);
     $pending = null;
@@ -471,12 +485,13 @@ function retry_bulk_payment(array $params): void
         flash('error', $e->getMessage());
         redirect_route('bulk/' . $order['token']);
     }
-    if ($started['mode'] === 'mock') {
-        redirect_route('pay/mock/' . $started['payment']['reference']);
+    $checkout = payment_checkout_redirect($started);
+    if ($checkout !== null) {
+        redirect($checkout);
     }
-    if ($started['mode'] === 'hosted' && $started['payment']['checkout_url']) {
-        header('Location: ' . $started['payment']['checkout_url']);
-        exit;
+    if ($started['mode'] === 'hosted') {
+        flash('error', 'The payment service returned an invalid checkout link. Please try again from your portal.');
+        redirect_route('status');
     }
     flash('success', 'Transfer instructions refreshed below.');
     redirect_route('bulk/' . $order['token'], ['pay' => $started['payment']['reference']]);
@@ -687,12 +702,13 @@ function start_payment_controller(): void
         redirect_route('portal/' . $token);
     }
 
-    if ($started['mode'] === 'mock') {
-        redirect_route('pay/mock/' . $started['payment']['reference']);
+    $checkout = payment_checkout_redirect($started);
+    if ($checkout !== null) {
+        redirect($checkout);
     }
-    if ($started['mode'] === 'hosted' && $started['payment']['checkout_url']) {
-        header('Location: ' . $started['payment']['checkout_url']);
-        exit;
+    if ($started['mode'] === 'hosted') {
+        flash('error', 'The payment service returned an invalid checkout link. Please try again from your portal.');
+        redirect_route('status');
     }
 
     flash('success', 'Transfer instructions are ready below.');
@@ -702,7 +718,7 @@ function start_payment_controller(): void
 /* ── Mock gateway ────────────────────────────────────────────────────── */
 function page_mock_gateway(array $params): void
 {
-    if (payment_mode() !== 'mock') {
+    if (!mock_payments_enabled()) {
         http_response_code(404);
         view('errors/404', ['title' => 'Not found'], 'layout');
         return;
@@ -719,7 +735,7 @@ function page_mock_gateway(array $params): void
 function mock_gateway_action(array $params): void
 {
     verify_csrf();
-    if (payment_mode() !== 'mock') {
+    if (!mock_payments_enabled()) {
         http_response_code(404);
         exit;
     }
@@ -739,11 +755,42 @@ function mock_gateway_action(array $params): void
 }
 
 /* ── Callback / webhook ──────────────────────────────────────────────── */
-function page_callback(): void
+function page_callback(array $params = []): void
 {
-    $reference = (string) request('reference', request('trxref', request('ref', '')));
+    if (throttle_limited('payment_callback', 60, 1)) {
+        http_response_code(429);
+        view('public/callback', [
+            'title'       => 'Payment status',
+            'result'      => [
+                'ok'      => false,
+                'state'   => 'pending',
+                'message' => 'Too many payment checks from this network. Please wait a moment and refresh this page.',
+            ],
+            'payment'     => null,
+            'participant' => null,
+            'house'       => null,
+            'bulkOrder'   => null,
+            'bulkTickets' => [],
+            'reference'   => '',
+        ], 'layout');
+        return;
+    }
+    throttle_hit('payment_callback');
+
+    // The gateway may use the path form or any of its common query aliases.
+    $reference = trim((string) ($params['reference'] ?? ''));
+    if ($reference === '') {
+        foreach (['reference', 'trxref', 'paymentReference', 'transaction_ref', 'transactionRef', 'ref'] as $key) {
+            $value = request($key);
+            if (is_string($value) && trim($value) !== '') {
+                $reference = trim($value);
+                break;
+            }
+        }
+    }
+
     $result = $reference === ''
-        ? ['ok' => false, 'state' => 'error', 'message' => 'No payment reference was supplied.']
+        ? ['ok' => false, 'state' => 'error', 'message' => 'No payment reference was supplied. If you were charged, contact support.']
         : handle_callback($reference);
 
     $payment = $result['payment'] ?? ($reference !== '' ? find_payment_by_reference($reference) : null);

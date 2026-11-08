@@ -3,6 +3,22 @@ declare(strict_types=1);
 
 const INSTALLMENT_COUNT = 10;
 
+/**
+ * Small in-place upgrade so an already-installed database keeps working.
+ * Cheap on every request (one PRAGMA/SHOW COLUMNS check).
+ */
+function ensure_payment_schema(): void
+{
+    if (!db_ready() || db_column_exists('payments', 'access_code')) {
+        return;
+    }
+    try {
+        db()->exec('ALTER TABLE payments ADD COLUMN access_code VARCHAR(191) NULL');
+    } catch (Throwable $e) {
+        log_error('Could not add payments.access_code: ' . $e->getMessage());
+    }
+}
+
 /* ── Fees ────────────────────────────────────────────────────────────── */
 function verified_installment_count(int $participantId): int
 {
@@ -291,6 +307,14 @@ function start_payment(array $participant, string $type, ?int $installment = nul
         throw new RuntimeException('Choose a valid payment option.');
     }
 
+    $mode = payment_mode();
+    if ($mode === 'mock' && !mock_payments_enabled()) {
+        throw new RuntimeException('Sandbox payments are disabled on this deployment.');
+    }
+    if ($mode === 'hosted' && !payment_provider_configured()) {
+        throw new RuntimeException('Hosted payments are not configured yet. Please contact support.');
+    }
+
     $fee = fee_for($type, $installment, $participant);
     $slot = $type === 'INSTALLMENT' ? (int) ($fee['installment'] ?? $installment) : null;
 
@@ -312,12 +336,9 @@ function start_payment(array $participant, string $type, ?int $installment = nul
         throw new RuntimeException('This payment has already been completed.');
     }
 
-    $mode = payment_mode();
     $reference = $existing['reference'] ?? ('SBHIC-' . strtoupper(bin2hex(random_bytes(8))));
     $provider = $mode === 'manual' ? 'manual_transfer' : ($mode === 'hosted' ? 'payvessel' : 'mock');
     $account = null;
-    $checkoutUrl = null;
-    $providerReference = $existing['provider_reference'] ?? null;
 
     if ($mode === 'manual') {
         $number = (string) setting('payment_account_number', config('payment.manual_account_no', ''));
@@ -331,15 +352,6 @@ function start_payment(array $participant, string $type, ?int $installment = nul
             'bank_name'      => (string) setting('payment_bank_name', config('payment.manual_bank', '')),
         ];
     } elseif ($mode === 'hosted') {
-        $checkout = hosted_create_checkout([
-            'email'     => (string) $participant['email'],
-            'amount'    => $fee['amount'],
-            'reference' => $reference,
-            'name'      => trim($participant['other_name'] . ' ' . $participant['surname']),
-            'phone'     => (string) $participant['phone'],
-        ]);
-        $checkoutUrl = $checkout['checkout_url'];
-        $providerReference = $checkout['reference'];
         $account = [
             'account_number' => '',
             'account_name'   => '',
@@ -349,6 +361,8 @@ function start_payment(array $participant, string $type, ?int $installment = nul
         $account = mock_account($reference);
     }
 
+    // Record the attempt before contacting the gateway so a crashed request can
+    // always be reconciled by support instead of vanishing without a trace.
     $data = [
         'amount'                 => $fee['amount'],
         'payment_type'           => $type,
@@ -359,8 +373,10 @@ function start_payment(array $participant, string $type, ?int $installment = nul
         'virtual_account_number' => $account['account_number'] ?: null,
         'account_name'           => $account['account_name'] ?: null,
         'bank_name'              => $account['bank_name'] ?: null,
-        'checkout_url'           => $checkoutUrl,
-        'provider_reference'     => $providerReference,
+        'checkout_url'           => null,
+        'provider_reference'     => null,
+        'access_code'            => null,
+        'failure_reason'         => null,
         'updated_at'             => now(),
     ];
 
@@ -373,6 +389,44 @@ function start_payment(array $participant, string $type, ?int $installment = nul
         $data['created_at'] = now();
         $paymentId = db_insert('payments', $data);
     }
+
+    $payment = db_one('SELECT * FROM payments WHERE id = ?', [$paymentId]);
+    try {
+        $authorization = payment_authorize($mode, [
+            'email'     => (string) $participant['email'],
+            'amount'    => (int) $fee['amount'],
+            'reference' => $reference,
+        ]);
+    } catch (Throwable $e) {
+        mark_payment_failed($payment, 'Payment service error.');
+        log_error('Payment authorization failed: ' . $e->getMessage(), ['reference' => $reference]);
+        throw new RuntimeException('The payment service is unavailable right now. Please try again shortly.');
+    }
+
+    if (empty($authorization['ok'])) {
+        $reason = (string) ($authorization['message'] ?? 'Payment could not be started. Please try again.');
+        mark_payment_failed($payment, $reason);
+        log_error('Gateway refused authorization', [
+            'reference' => $reference,
+            'status'    => $authorization['status'] ?? 'unknown',
+        ]);
+        throw new RuntimeException($reason);
+    }
+
+    $update = ['updated_at' => now()];
+    if (!empty($authorization['redirect_url'])) {
+        $update['checkout_url'] = (string) $authorization['redirect_url'];
+    }
+    if (!empty($authorization['reference'])) {
+        $safeReference = payment_safe_provider_reference((string) $authorization['reference'], (int) $paymentId);
+        if ($safeReference !== null) {
+            $update['provider_reference'] = $safeReference;
+        }
+    }
+    if (!empty($authorization['access_code'])) {
+        $update['access_code'] = (string) $authorization['access_code'];
+    }
+    db_update('payments', $update, 'id = ?', [$paymentId]);
 
     db_update('participants', [
         'amount_owed' => $fee['total_fee'],
@@ -532,16 +586,21 @@ function start_bulk_payment(array $order): array
         throw new RuntimeException('This bulk order is already paid.');
     }
 
+    $mode = payment_mode();
+    if ($mode === 'mock' && !mock_payments_enabled()) {
+        throw new RuntimeException('Sandbox payments are disabled on this deployment.');
+    }
+    if ($mode === 'hosted' && !payment_provider_configured()) {
+        throw new RuntimeException('Hosted payments are not configured yet. Please contact support.');
+    }
+
     $existing = db_one(
         "SELECT * FROM payments WHERE bulk_order_id = ? AND status IN ('PENDING','FAILED') ORDER BY id DESC LIMIT 1",
         [$order['id']]
     );
-    $mode = payment_mode();
     $reference = $existing['reference'] ?? ('SBHIC-BULK-' . strtoupper(bin2hex(random_bytes(6))));
     $provider = $mode === 'manual' ? 'manual_transfer' : ($mode === 'hosted' ? 'payvessel' : 'mock');
     $account = null;
-    $checkoutUrl = null;
-    $providerReference = $existing['provider_reference'] ?? null;
 
     if ($mode === 'manual') {
         $number = (string) setting('payment_account_number', config('payment.manual_account_no', ''));
@@ -555,16 +614,11 @@ function start_bulk_payment(array $order): array
             'bank_name'      => (string) setting('payment_bank_name', config('payment.manual_bank', '')),
         ];
     } elseif ($mode === 'hosted') {
-        $checkout = hosted_create_checkout([
-            'email'     => (string) $order['buyer_email'],
-            'amount'    => (int) $order['amount'],
-            'reference' => $reference,
-            'name'      => 'SB HIC Bulk Buyer',
-            'phone'     => (string) $order['buyer_phone'],
-        ]);
-        $checkoutUrl = $checkout['checkout_url'];
-        $providerReference = $checkout['reference'];
-        $account = ['account_number' => '', 'account_name' => '', 'bank_name' => (string) config('payment.provider', 'PayVessel')];
+        $account = [
+            'account_number' => '',
+            'account_name'   => '',
+            'bank_name'      => (string) config('payment.provider', 'PayVessel'),
+        ];
     } else {
         $account = mock_account($reference);
     }
@@ -579,8 +633,10 @@ function start_bulk_payment(array $order): array
         'virtual_account_number' => $account['account_number'] ?: null,
         'account_name'           => $account['account_name'] ?: null,
         'bank_name'              => $account['bank_name'] ?: null,
-        'checkout_url'           => $checkoutUrl,
-        'provider_reference'     => $providerReference,
+        'checkout_url'           => null,
+        'provider_reference'     => null,
+        'access_code'            => null,
+        'failure_reason'         => null,
         'bulk_order_id'          => (int) $order['id'],
         'updated_at'             => now(),
     ];
@@ -595,6 +651,44 @@ function start_bulk_payment(array $order): array
     }
 
     db_update('bulk_orders', ['reference' => $reference, 'updated_at' => now()], 'id = ?', [$order['id']]);
+
+    $payment = db_one('SELECT * FROM payments WHERE id = ?', [$paymentId]);
+    try {
+        $authorization = payment_authorize($mode, [
+            'email'     => (string) $order['buyer_email'],
+            'amount'    => (int) $order['amount'],
+            'reference' => $reference,
+        ]);
+    } catch (Throwable $e) {
+        mark_payment_failed($payment, 'Payment service error.');
+        log_error('Bulk payment authorization failed: ' . $e->getMessage(), ['reference' => $reference]);
+        throw new RuntimeException('The payment service is unavailable right now. Please try again shortly.');
+    }
+
+    if (empty($authorization['ok'])) {
+        $reason = (string) ($authorization['message'] ?? 'Payment could not be started. Please try again.');
+        mark_payment_failed($payment, $reason);
+        log_error('Gateway refused bulk authorization', [
+            'reference' => $reference,
+            'status'    => $authorization['status'] ?? 'unknown',
+        ]);
+        throw new RuntimeException($reason);
+    }
+
+    $update = ['updated_at' => now()];
+    if (!empty($authorization['redirect_url'])) {
+        $update['checkout_url'] = (string) $authorization['redirect_url'];
+    }
+    if (!empty($authorization['reference'])) {
+        $safeReference = payment_safe_provider_reference((string) $authorization['reference'], (int) $paymentId);
+        if ($safeReference !== null) {
+            $update['provider_reference'] = $safeReference;
+        }
+    }
+    if (!empty($authorization['access_code'])) {
+        $update['access_code'] = (string) $authorization['access_code'];
+    }
+    db_update('payments', $update, 'id = ?', [$paymentId]);
 
     audit('BULK_PAYMENT_INITIATED', 'bulk_order', (string) $order['id'], null, [
         'amount' => (int) $order['amount'], 'mode' => $mode, 'reference' => $reference,
@@ -683,12 +777,14 @@ function record_payment_event(string $providerReference, ?int $paymentId, int $a
     }
 }
 
-function mark_payment_verified(array $payment, string $providerReference, int $amount, string $source = 'gateway'): array
+function mark_payment_verified(array $payment, string $providerReference, int $amount, string $source = 'gateway', ?string $accessCode = null): array
 {
     $pdo = db();
     $pdo->beginTransaction();
     try {
-        $fresh = db_one('SELECT * FROM payments WHERE id = ?', [$payment['id']]);
+        // Lock the row for the whole decision + transition. SQLite serialises
+        // writers itself, so the helper returns an empty suffix there.
+        $fresh = db_one('SELECT * FROM payments WHERE id = ?' . payment_row_lock_sql(), [$payment['id']]);
         if (!$fresh) {
             $pdo->rollBack();
             return ['ok' => false, 'result' => 'missing', 'message' => 'Payment not found.'];
@@ -698,24 +794,60 @@ function mark_payment_verified(array $payment, string $providerReference, int $a
             $pdo->commit();
             return ['ok' => true, 'result' => 'already', 'message' => 'Payment was already verified.'];
         }
-        if ($amount < (int) $fresh['amount']) {
-            record_payment_event($providerReference, (int) $fresh['id'], $amount, 'UNDERPAID', ['source' => $source]);
+        if (!in_array($fresh['status'], ['PENDING', 'INITIATED'], true)) {
+            record_payment_event($providerReference, (int) $fresh['id'], $amount, 'IGNORED_STATUS', ['source' => $source, 'local' => $fresh['status']]);
             $pdo->commit();
-            return ['ok' => false, 'result' => 'underpaid', 'message' => 'Amount received is less than the amount due.'];
+            return ['ok' => false, 'result' => 'not_pending', 'message' => 'This payment is no longer awaiting confirmation.'];
+        }
+        // A paid result for the wrong amount is still a failed payment. A
+        // missing amount is rejected earlier by the caller.
+        if ($amount !== (int) $fresh['amount']) {
+            record_payment_event($providerReference, (int) $fresh['id'], $amount, 'AMOUNT_MISMATCH', [
+                'source' => $source, 'expected' => (int) $fresh['amount'],
+            ]);
+            $pdo->commit();
+            return ['ok' => false, 'result' => 'amount_mismatch', 'message' => 'Amount received does not match the amount due.'];
+        }
+        if ($accessCode !== null && $accessCode !== '' && !empty($fresh['access_code'])
+            && !hash_equals((string) $fresh['access_code'], $accessCode)) {
+            record_payment_event($providerReference, (int) $fresh['id'], $amount, 'ACCESS_CODE_MISMATCH', ['source' => $source]);
+            $pdo->commit();
+            return ['ok' => false, 'result' => 'access_code_mismatch', 'message' => 'The payment access code did not match.'];
         }
 
-        $updated = db_exec(
-            "UPDATE payments SET status = 'VERIFIED', provider_reference = ?, paid_at = ?, verified_at = ?,
-             failure_reason = NULL, updated_at = ? WHERE id = ? AND status <> 'VERIFIED'",
-            [$providerReference, now(), now(), now(), $fresh['id']]
-        );
+        // provider_reference is unique in the guide's schema. Never steal a
+        // reference owned by another payment row.
+        $newReference = trim($providerReference) !== ''
+            ? trim($providerReference)
+            : (string) ($fresh['provider_reference'] ?: $fresh['reference']);
+        if ($newReference !== '' && $newReference !== (string) $fresh['provider_reference']) {
+            $collision = db_one(
+                'SELECT id FROM payments WHERE provider_reference = ? AND id <> ? LIMIT 1',
+                [$newReference, $fresh['id']]
+            );
+            if ($collision) {
+                $newReference = (string) $fresh['provider_reference'];
+            }
+        }
+
+        $sql = "UPDATE payments SET status = 'VERIFIED', provider_reference = ?, paid_at = ?, verified_at = ?,
+                failure_reason = NULL, updated_at = ?";
+        $params = [$newReference, now(), now(), now()];
+        if ($accessCode !== null && $accessCode !== '') {
+            $sql .= ', access_code = ?';
+            $params[] = $accessCode;
+        }
+        $sql .= " WHERE id = ? AND status IN ('PENDING','INITIATED')";
+        $params[] = $fresh['id'];
+
+        $updated = db_exec($sql, $params);
         if ($updated === 0) {
-            record_payment_event($providerReference, (int) $fresh['id'], $amount, 'DUPLICATE_PAYMENT', ['source' => $source]);
+            record_payment_event($newReference, (int) $fresh['id'], $amount, 'DUPLICATE_PAYMENT', ['source' => $source]);
             $pdo->commit();
             return ['ok' => true, 'result' => 'already', 'message' => 'Payment was already verified.'];
         }
 
-        record_payment_event($providerReference, (int) $fresh['id'], $amount, 'MATCHED', ['source' => $source]);
+        record_payment_event($newReference, (int) $fresh['id'], $amount, 'MATCHED', ['source' => $source]);
 
         if (!empty($fresh['bulk_order_id'])) {
             $order = refresh_bulk_order((int) $fresh['bulk_order_id']);
@@ -761,18 +893,171 @@ function mark_payment_verified(array $payment, string $providerReference, int $a
 
 function mark_payment_failed(array $payment, string $reason): void
 {
-    db_update('payments', [
+    $updated = db_update('payments', [
         'status'         => 'FAILED',
         'failure_reason' => mb_substr($reason, 0, 250),
         'updated_at'     => now(),
-    ], 'id = ? AND status = ?', [$payment['id'], 'PENDING']);
-    audit('PAYMENT_FAILED', 'payment', (string) $payment['reference'], null, ['reason' => $reason]);
+    ], "id = ? AND status IN ('PENDING','INITIATED')", [$payment['id']]);
+    if ($updated > 0) {
+        audit('PAYMENT_FAILED', 'payment', (string) $payment['reference'], null, ['reason' => $reason]);
+    }
 }
 
-/* ── Hosted gateway (PayVessel / PayFlow) ────────────────────────────── */
+/* ── Payment providers ───────────────────────────────────────────────── */
 function gateway_configured(): bool
 {
-    return config('payment.api_key', '') !== '' && config('payment.secret_key', '') !== '';
+    return trim((string) config('payment.base_url', '')) !== ''
+        && trim((string) config('payment.api_key', '')) !== ''
+        && trim((string) config('payment.secret_key', '')) !== '';
+}
+
+function payment_provider_configured(?string $mode = null): bool
+{
+    $mode ??= payment_mode();
+    if ($mode === 'mock') {
+        return mock_payments_enabled();
+    }
+    if ($mode === 'manual') {
+        return trim((string) setting('payment_account_number', config('payment.manual_account_no', ''))) !== ''
+            && trim((string) setting('payment_account_name', config('payment.manual_account_name', ''))) !== '';
+    }
+    return gateway_configured();
+}
+
+/** The sandbox must never be able to mark a real order paid. */
+function mock_payments_enabled(): bool
+{
+    return payment_mode() === 'mock' && config('app.env') !== 'production';
+}
+
+/** MySQL supports SELECT … FOR UPDATE; SQLite serialises writers itself. */
+function payment_row_lock_sql(): string
+{
+    return ($GLOBALS['config']['db']['driver'] ?? 'sqlite') === 'mysql' ? ' FOR UPDATE' : '';
+}
+
+/** Never let a newly authorised reference steal one already owned by a row. */
+function payment_safe_provider_reference(string $candidate, int $paymentId): ?string
+{
+    $candidate = trim($candidate);
+    if ($candidate === '') {
+        return null;
+    }
+    $collision = db_one(
+        'SELECT id FROM payments WHERE provider_reference = ? AND id <> ? LIMIT 1',
+        [$candidate, $paymentId]
+    );
+    return $collision ? null : $candidate;
+}
+
+function payment_amount_to_gateway(int $amount): int
+{
+    return strtolower((string) config('payment.amount_unit', 'major')) === 'minor' ? $amount * 100 : $amount;
+}
+
+/** Normalise a gateway amount to an integer in the major unit, or null when absent. */
+function payment_parse_amount(mixed $value): ?int
+{
+    if ($value === null || is_bool($value)) {
+        return null;
+    }
+    if (is_int($value)) {
+        return $value;
+    }
+    if (is_float($value)) {
+        return (int) round($value);
+    }
+    $text = trim((string) $value);
+    if ($text === '') {
+        return null;
+    }
+    $text = preg_replace('/[^0-9.\-]/', '', $text) ?? '';
+    if ($text === '' || $text === '-' || $text === '.' || $text === '-.') {
+        return null;
+    }
+    return (int) round((float) $text);
+}
+
+function payment_verify_amount(mixed $value): ?int
+{
+    $amount = payment_parse_amount($value);
+    if ($amount === null) {
+        return null;
+    }
+    return strtolower((string) config('payment.verify_amount_unit', 'major')) === 'minor'
+        ? (int) round($amount / 100)
+        : $amount;
+}
+
+/** Read the first present, non-empty value from a list of dot-notation paths. */
+function payment_extract_by_paths(array $payload, array $paths): mixed
+{
+    foreach ($paths as $path) {
+        $value = $payload;
+        $found = true;
+        foreach (explode('.', $path) as $segment) {
+            if (!is_array($value) || !array_key_exists($segment, $value)) {
+                $found = false;
+                break;
+            }
+            $value = $value[$segment];
+        }
+        if ($found && $value !== null && $value !== '' && !is_bool($value)) {
+            return $value;
+        }
+    }
+    return null;
+}
+
+function payment_status_kind(string $status): string
+{
+    $status = strtolower(trim($status));
+    if ($status === '') {
+        return 'unknown';
+    }
+    $paid = array_map('strtolower', (array) config('payment.paid_statuses', []));
+    $pending = array_map('strtolower', (array) config('payment.pending_statuses', []));
+    $failed = array_map('strtolower', (array) config('payment.failed_statuses', []));
+    if (in_array($status, $paid, true)) {
+        return 'paid';
+    }
+    if (in_array($status, $pending, true)) {
+        return 'pending';
+    }
+    if (in_array($status, $failed, true)) {
+        return 'failed';
+    }
+    return 'unknown';
+}
+
+/** Only absolute http(s) URLs may ever leave this application. */
+function payment_safe_redirect_url(string $url): ?string
+{
+    $url = trim($url);
+    if ($url === '') {
+        return null;
+    }
+    $parts = parse_url($url);
+    if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
+        return null;
+    }
+    if (!in_array(strtolower((string) $parts['scheme']), ['http', 'https'], true)) {
+        return null;
+    }
+    return $url;
+}
+
+/** Where should the browser go after a payment is started? */
+function payment_checkout_redirect(array $started): ?string
+{
+    $mode = (string) ($started['mode'] ?? '');
+    if ($mode === 'mock') {
+        return absolute_url('pay/mock/' . rawurlencode((string) ($started['payment']['reference'] ?? '')));
+    }
+    if ($mode === 'hosted') {
+        return payment_safe_redirect_url((string) ($started['payment']['checkout_url'] ?? ''));
+    }
+    return null;
 }
 
 function http_json(string $method, string $url, array $headers, ?array $body = null): array
@@ -786,13 +1071,16 @@ function http_json(string $method, string $url, array $headers, ?array $body = n
         $headerLines[] = 'Content-Type: application/json';
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body, JSON_UNESCAPED_SLASHES));
     }
+    $timeout = max(5, (int) config('payment.http_timeout', 30));
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_CUSTOMREQUEST  => $method,
         CURLOPT_HTTPHEADER     => $headerLines,
-        CURLOPT_CONNECTTIMEOUT => 10,
-        CURLOPT_TIMEOUT        => 25,
+        CURLOPT_CONNECTTIMEOUT => min(10, $timeout),
+        CURLOPT_TIMEOUT        => $timeout,
         CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
+        CURLOPT_FOLLOWLOCATION => false,
     ]);
     $raw = curl_exec($ch);
     $error = curl_error($ch);
@@ -803,99 +1091,380 @@ function http_json(string $method, string $url, array $headers, ?array $body = n
         throw new RuntimeException('Could not reach the payment service: ' . $error);
     }
     $json = json_decode((string) $raw, true);
-    if (!is_array($json)) {
-        throw new RuntimeException('The payment service returned an unexpected response.');
-    }
-    return ['status' => $status, 'json' => $json, 'raw' => $raw];
+    return ['status' => $status, 'json' => is_array($json) ? $json : null, 'raw' => (string) $raw];
 }
 
 function gateway_headers(): array
 {
+    $apiHeader = trim((string) config('payment.api_key_header', 'api-key')) ?: 'api-key';
+    $authHeader = trim((string) config('payment.auth_header', 'Authorization')) ?: 'Authorization';
+    $scheme = trim((string) config('payment.auth_scheme', 'Bearer'));
     return [
-        'api-key'       => (string) config('payment.api_key', ''),
-        'Authorization' => 'Bearer ' . config('payment.secret_key', ''),
+        $apiHeader  => (string) config('payment.api_key', ''),
+        $authHeader => ($scheme !== '' ? $scheme . ' ' : '') . (string) config('payment.secret_key', ''),
     ];
 }
 
-function hosted_create_checkout(array $p): array
+/**
+ * Create a hosted checkout session (or return the local sandbox URL).
+ *
+ * @return array{ok: bool, redirect_url?: string|null, reference?: string|null,
+ *               access_code?: string|null, status?: string, message?: string}
+ */
+function payment_authorize(string $mode, array $p): array
 {
-    if (!gateway_configured()) {
-        throw new RuntimeException('Hosted payments are not configured. Add the gateway keys in .env.');
+    if ($mode === 'manual') {
+        return ['ok' => true, 'redirect_url' => null, 'reference' => $p['reference'] ?? null, 'access_code' => null];
     }
-    $base = (string) config('payment.base_url');
-    $path = (string) config('payment.authorize_path', '/api/authorize');
-    $callback = (string) config('payment.callback_url', '');
+    if ($mode === 'mock') {
+        return [
+            'ok'           => true,
+            'redirect_url' => absolute_url('pay/mock/' . rawurlencode((string) ($p['reference'] ?? ''))),
+            'reference'    => (string) ($p['reference'] ?? ''),
+            'access_code'  => null,
+            'status'       => 'created',
+        ];
+    }
+
+    if (!gateway_configured()) {
+        return ['ok' => false, 'status' => 'invalid_config', 'message' => 'Hosted payments are not configured yet. Please contact support.'];
+    }
+
+    $base = rtrim((string) config('payment.base_url'), '/');
+    $path = '/' . ltrim((string) config('payment.authorize_path', '/api/authorize'), '/');
+    $callback = trim((string) config('payment.callback_url', ''));
     if ($callback === '') {
         $callback = absolute_url('payment/callback');
     }
 
     $payload = [
-        'email'    => $p['email'],
-        'amount'   => (int) $p['amount'],
+        'email'    => (string) ($p['email'] ?? ''),
+        'amount'   => payment_amount_to_gateway((int) ($p['amount'] ?? 0)),
         'callback' => $callback,
-        'name'     => $p['name'],
-        'phone'    => $p['phone'],
-        'tickets'  => $p['reference'],
+        'tickets'  => (string) ($p['reference'] ?? ''),
     ];
-    $response = http_json('POST', $base . $path, gateway_headers(), $payload);
+
+    try {
+        $response = http_json('POST', $base . $path, gateway_headers(), $payload);
+    } catch (Throwable $e) {
+        log_error('Gateway authorize network failure', ['reference' => $p['reference'] ?? '']);
+        return ['ok' => false, 'status' => 'network', 'message' => 'Could not reach the payment service. Please try again shortly.'];
+    }
+
+    $http = (int) $response['status'];
+    if ($http >= 500) {
+        log_error('Gateway authorize server error', ['status' => $http, 'reference' => $p['reference'] ?? '']);
+        return ['ok' => false, 'status' => 'http_500', 'message' => 'The payment service is temporarily unavailable. Please try again shortly.'];
+    }
+    if ($http < 200 || $http >= 300) {
+        log_error('Gateway authorize rejected request', ['status' => $http, 'reference' => $p['reference'] ?? '']);
+        return ['ok' => false, 'status' => 'http_' . $http, 'message' => 'The payment service could not start this payment. Please try again.'];
+    }
+
     $json = $response['json'];
-    $data = $json['data'] ?? null;
-
-    if (!$data || empty($data['reference'])) {
-        log_error('Gateway authorize failed', ['status' => $response['status'], 'response' => mb_substr($response['raw'], 0, 800)]);
-        throw new RuntimeException('The payment service could not create a checkout. Please try again.');
+    if (!is_array($json)) {
+        return ['ok' => false, 'status' => 'invalid_response', 'message' => 'The payment service returned an unexpected response.'];
+    }
+    if (($json['status'] ?? null) === false) {
+        return ['ok' => false, 'status' => 'rejected', 'message' => (string) ($json['message'] ?? 'The payment service could not start this payment.')];
     }
 
-    $url = $data['authorization_url'] ?? $data['checkout_url'] ?? null;
-    if (!$url) {
-        throw new RuntimeException('The payment service did not return a checkout URL.');
+    $url = payment_extract_by_paths($json, [
+        'data.authorization_url', 'data.authorizationUrl', 'data.checkout_url', 'data.checkoutUrl',
+        'authorization_url', 'authorizationUrl', 'checkout_url', 'checkoutUrl',
+        'payment_url', 'paymentUrl', 'url', 'redirect_url',
+    ]);
+    $safe = payment_safe_redirect_url((string) ($url ?? ''));
+    if ($safe === null) {
+        log_error('Gateway authorize returned no safe redirect', ['reference' => $p['reference'] ?? '']);
+        return ['ok' => false, 'status' => 'invalid_response', 'message' => 'The payment service did not return a valid checkout link.'];
     }
+
+    $reference = payment_extract_by_paths($json, [
+        'data.reference', 'data.transactionReference', 'data.transaction_reference', 'data.txnReference',
+        'reference', 'transactionReference', 'transaction_reference', 'txnReference',
+    ]);
+    $accessCode = payment_extract_by_paths($json, [
+        'data.access_code', 'data.accessCode', 'access_code', 'accessCode',
+        'data.uniquePaymentId', 'uniquePaymentId',
+    ]);
 
     return [
-        'reference'   => (string) $data['reference'],
-        'access_code' => (string) ($data['access_code'] ?? ''),
-        'checkout_url' => (string) $url,
+        'ok'           => true,
+        'redirect_url' => $safe,
+        'reference'    => (string) ($reference ?? $p['reference'] ?? ''),
+        'access_code'  => $accessCode === null ? null : (string) $accessCode,
+        'status'       => 'created',
     ];
 }
 
+/**
+ * Verify a payment server-to-server. Never throws for a gateway error.
+ *
+ * @return array{ok: bool, paid: bool, pending?: bool, failed?: bool,
+ *               status: string, amount?: int|null, access_code?: string|null,
+ *               reference?: string, message?: string}
+ */
 function hosted_verify(string $reference): array
 {
     if (!gateway_configured()) {
-        return ['ok' => false, 'message' => 'Hosted payments are not configured.'];
+        return ['ok' => false, 'paid' => false, 'status' => 'invalid_config', 'message' => 'Hosted payments are not configured.'];
     }
-    $ref = preg_replace('/^TXN/i', '', $reference);
-    $verifyRef = 'TXN' . $ref;
-    $path = str_replace('{reference}', rawurlencode($verifyRef), (string) config('payment.verify_path', '/api/verify/{reference}'));
-    $url = (string) config('payment.base_url') . $path;
+
+    $ref = trim($reference);
+    if ($ref === '') {
+        return ['ok' => false, 'paid' => false, 'status' => 'invalid_reference', 'message' => 'No payment reference was supplied.'];
+    }
+    $prefix = trim((string) config('payment.verify_reference_prefix', 'TXN'));
+    if ($prefix !== '' && stripos($ref, $prefix) !== 0) {
+        $ref = $prefix . $ref;
+    }
+
+    $path = '/' . ltrim(str_replace('{reference}', rawurlencode($ref), (string) config('payment.verify_path', '/api/verify/{reference}')), '/');
+    $url = rtrim((string) config('payment.base_url'), '/') . $path;
 
     try {
         $response = http_json('GET', $url, gateway_headers());
     } catch (Throwable $e) {
-        log_error('Gateway verify failed: ' . $e->getMessage(), ['reference' => $reference]);
-        return ['ok' => false, 'message' => 'Could not verify with the payment service. Please try again shortly.'];
+        log_error('Gateway verify network failure', ['reference' => $reference]);
+        return ['ok' => false, 'paid' => false, 'status' => 'network', 'message' => 'Could not verify with the payment service. Please try again shortly.'];
+    }
+
+    $http = (int) $response['status'];
+    if ($http >= 500) {
+        log_error('Gateway verify server error', ['status' => $http, 'reference' => $reference]);
+        return ['ok' => false, 'paid' => false, 'status' => 'http_500', 'message' => 'The payment service is temporarily unavailable. Please try again shortly.'];
+    }
+    if ($http < 200 || $http >= 300) {
+        log_error('Gateway verify rejected request', ['status' => $http, 'reference' => $reference]);
+        return ['ok' => false, 'paid' => false, 'status' => 'http_' . $http, 'message' => 'The payment service could not verify this payment. Please try again.'];
     }
 
     $json = $response['json'];
-    $data = $json['data'] ?? [];
-    $status = strtolower((string) ($data['status'] ?? ''));
-    $amount = (int) round((float) ($data['amount'] ?? 0));
+    if (!is_array($json)) {
+        return ['ok' => false, 'paid' => false, 'status' => 'invalid_response', 'message' => 'The payment service returned an unexpected response.'];
+    }
 
-    if (!in_array($status, ['success', 'successful', 'paid', 'completed'], true)) {
+    $statusRaw = payment_extract_by_paths($json, [
+        'data.status', 'data.paymentStatus', 'data.transactionStatus',
+        'status', 'paymentStatus', 'transactionStatus', 'message',
+    ]);
+    $status = strtolower(trim((string) ($statusRaw ?? 'unknown')));
+    if ($status === '') {
+        $status = 'unknown';
+    }
+    $kind = payment_status_kind($status);
+    if (($json['status'] ?? null) === false && $kind === 'unknown') {
+        $kind = 'failed';
+        $status = 'failed';
+    }
+    if ($kind === 'unknown') {
+        log_warning('Unknown gateway payment status', ['status' => $status, 'reference' => $reference]);
+    }
+
+    $amount = payment_verify_amount(payment_extract_by_paths($json, [
+        'data.amount', 'data.transactionAmount', 'data.totalAmount',
+        'amount', 'transactionAmount', 'totalAmount',
+    ]));
+    $access = payment_extract_by_paths($json, [
+        'data.access_code', 'data.accessCode', 'access_code', 'accessCode',
+        'data.uniquePaymentId', 'uniquePaymentId',
+    ]);
+    $refOut = payment_extract_by_paths($json, [
+        'data.reference', 'data.transactionReference', 'reference', 'transactionReference',
+    ]);
+    $message = (string) (
+        $json['message']
+        ?? ($json['data']['status_message'] ?? '')
+    );
+
+    return [
+        'ok'          => true,
+        'paid'        => $kind === 'paid',
+        'pending'     => $kind === 'pending',
+        'failed'      => $kind === 'failed',
+        'status'      => $status,
+        'amount'      => $amount,
+        'access_code' => ($access === null || $access === '') ? null : (string) $access,
+        'reference'   => (string) ($refOut ?? $reference),
+        'message'     => $message,
+    ];
+}
+
+function mock_verify(array $payment): array
+{
+    $status = strtoupper((string) ($payment['status'] ?? 'PENDING'));
+    if ($status === 'VERIFIED') {
+        return ['ok' => true, 'paid' => true, 'pending' => false, 'status' => 'success', 'amount' => (int) $payment['amount'], 'access_code' => null];
+    }
+    if (in_array($status, ['FAILED', 'REFUNDED', 'CANCELLED'], true)) {
+        return ['ok' => true, 'paid' => false, 'pending' => false, 'failed' => true, 'status' => 'failed', 'message' => 'Sandbox payment was not completed.'];
+    }
+    return ['ok' => true, 'paid' => false, 'pending' => true, 'status' => 'pending', 'message' => 'Sandbox payment is awaiting confirmation.'];
+}
+
+function manual_verify(array $payment): array
+{
+    return ['ok' => true, 'paid' => false, 'pending' => true, 'status' => 'pending', 'message' => 'Bank transfer is awaiting confirmation by an admin.'];
+}
+
+function payment_verify(string $reference, array $payment): array
+{
+    $provider = (string) ($payment['provider'] ?? '');
+    if ($provider === 'mock') {
+        return mock_verify($payment);
+    }
+    if ($provider === 'manual_transfer') {
+        return manual_verify($payment);
+    }
+    return hosted_verify($reference !== '' ? $reference : (string) ($payment['provider_reference'] ?: $payment['reference']));
+}
+
+/** A concurrent callback may have verified while this one was still deciding. */
+function payment_settle_failure(array $payment, string $message): array
+{
+    $fresh = db_one('SELECT * FROM payments WHERE id = ?', [$payment['id']]);
+    if ($fresh && in_array($fresh['status'], ['VERIFIED', 'COMPLETED'], true)) {
+        return ['ok' => true, 'state' => 'verified', 'message' => 'This payment is already confirmed.', 'payment' => $fresh];
+    }
+    return ['ok' => false, 'state' => 'failed', 'message' => $message, 'payment' => $fresh];
+}
+
+/**
+ * Apply the verification decision table from the integration guide.
+ * Used by the browser callback, the portal re-check and the admin action.
+ */
+function settle_payment_with_gateway(array $payment): array
+{
+    $reference = (string) ($payment['provider_reference'] ?: $payment['reference']);
+    $result = payment_verify($reference, $payment);
+
+    if (empty($result['ok'])) {
+        log_error('Gateway verification failed', [
+            'status'    => $result['status'] ?? 'unknown',
+            'reference' => $payment['reference'] ?? '',
+        ]);
         return [
             'ok'      => false,
-            'pending' => in_array($status, ['pending', 'ongoing', 'processing', 'queued'], true) && (bool) config('payment.allow_pending', false),
-            'failed'  => in_array($status, ['failed', 'abandoned', 'reversed', 'declined', 'invalid', 'expired', 'cancelled', 'canceled'], true),
-            'message' => (string) ($data['status_message'] ?? 'Payment was not successful.'),
-            'status'  => $status,
+            'state'   => 'pending',
+            'message' => (string) ($result['message'] ?? 'We could not verify this payment right now. Please try again.'),
+            'payment' => $payment,
         ];
     }
 
+    $status = strtolower((string) ($result['status'] ?? 'unknown'));
+
+    if (empty($result['paid'])) {
+        if (!empty($result['pending']) && !(bool) config('payment.allow_pending', false)) {
+            return [
+                'ok'      => false,
+                'state'   => 'pending',
+                'message' => (string) ($result['message'] ?? 'This payment is still pending.'),
+                'payment' => $payment,
+            ];
+        }
+        if (empty($result['pending'])) {
+            if ($status !== 'unknown' || !empty($result['failed'])) {
+                mark_payment_failed($payment, 'Gateway status: ' . ($status ?: 'failed'));
+                return payment_settle_failure($payment, (string) ($result['message'] ?? 'The payment was not successful.'));
+            }
+            return [
+                'ok'      => false,
+                'state'   => 'pending',
+                'message' => 'We could not confirm this payment yet. Please try again shortly.',
+                'payment' => $payment,
+            ];
+        }
+    }
+
+    if (!array_key_exists('amount', $result) || $result['amount'] === null) {
+        log_warning('Gateway paid response missing amount', ['reference' => $payment['reference'] ?? '']);
+        return [
+            'ok'      => false,
+            'state'   => 'pending',
+            'message' => 'The payment service did not return an amount. Please try again shortly.',
+            'payment' => $payment,
+        ];
+    }
+
+    if ((int) $result['amount'] !== (int) $payment['amount']) {
+        mark_payment_failed($payment, 'Amount mismatch.');
+        log_error('Gateway amount mismatch', [
+            'reference' => $payment['reference'] ?? '',
+            'expected'  => (int) $payment['amount'],
+            'received'  => (int) $result['amount'],
+        ]);
+        return payment_settle_failure($payment, 'The amount paid does not match this registration.');
+    }
+
+    $access = $result['access_code'] ?? null;
+    if ($access !== null && $access !== '' && !empty($payment['access_code'])
+        && !hash_equals((string) $payment['access_code'], (string) $access)) {
+        mark_payment_failed($payment, 'Access code mismatch.');
+        log_error('Gateway access code mismatch', ['reference' => $payment['reference'] ?? '']);
+        return payment_settle_failure($payment, 'The payment could not be matched to this registration.');
+    }
+
+    $marked = mark_payment_verified(
+        $payment,
+        (string) ($result['reference'] ?? $reference),
+        (int) $result['amount'],
+        'callback',
+        $access !== null ? (string) $access : null
+    );
+    if ($marked['ok']) {
+        return [
+            'ok'      => true,
+            'state'   => 'verified',
+            'message' => $marked['message'],
+            'payment' => db_one('SELECT * FROM payments WHERE id = ?', [$payment['id']]),
+        ];
+    }
+
+    if (in_array($marked['result'] ?? '', ['amount_mismatch', 'access_code_mismatch', 'not_pending'], true)) {
+        return payment_settle_failure($payment, $marked['message']);
+    }
     return [
-        'ok'       => true,
-        'amount'   => $amount,
-        'reference' => (string) ($data['reference'] ?? $reference),
-        'status'   => $status,
+        'ok'      => false,
+        'state'   => 'pending',
+        'message' => $marked['message'],
+        'payment' => db_one('SELECT * FROM payments WHERE id = ?', [$payment['id']]),
     ];
+}
+
+/** Re-check pending hosted payments when the buyer reopens a completion page. */
+function reverify_pending_payment(array $payment, int $minSeconds = 20): array
+{
+    $id = (int) ($payment['id'] ?? 0);
+    if ($id <= 0) {
+        return ['ok' => false, 'skipped' => true];
+    }
+    $last = (int) ($_SESSION['_payment_reverify'][$id] ?? 0);
+    if (time() - $last < $minSeconds) {
+        return ['ok' => false, 'skipped' => true];
+    }
+    $_SESSION['_payment_reverify'][$id] = time();
+    return settle_payment_with_gateway($payment);
+}
+
+function reverify_participant_payments(int $participantId): void
+{
+    foreach (db_all(
+        "SELECT * FROM payments WHERE participant_id = ? AND status = 'PENDING' AND provider = 'payvessel'",
+        [$participantId]
+    ) as $payment) {
+        reverify_pending_payment($payment);
+    }
+}
+
+function reverify_bulk_payments(int $orderId): void
+{
+    foreach (db_all(
+        "SELECT * FROM payments WHERE bulk_order_id = ? AND status = 'PENDING' AND provider = 'payvessel'",
+        [$orderId]
+    ) as $payment) {
+        reverify_pending_payment($payment);
+    }
 }
 
 function find_payment_by_reference(string $reference): ?array
@@ -904,10 +1473,35 @@ function find_payment_by_reference(string $reference): ?array
     if ($reference === '') {
         return null;
     }
-    $clean = preg_replace('/^TXN/i', '', $reference);
+
+    $forms = [$reference];
+    $prefixes = array_values(array_filter([
+        trim((string) config('payment.reference_prefix', '')),
+        trim((string) config('payment.verify_reference_prefix', 'TXN')),
+    ]));
+    foreach ($prefixes as $prefix) {
+        if ($prefix === '') {
+            continue;
+        }
+        if (stripos($reference, $prefix) === 0) {
+            $forms[] = substr($reference, strlen($prefix));
+        } else {
+            $forms[] = $prefix . $reference;
+        }
+    }
+    $forms = array_values(array_unique(array_filter($forms, static fn (string $v): bool => $v !== '')));
+
+    $where = [];
+    $params = [];
+    foreach ($forms as $form) {
+        $where[] = '(reference = ? OR provider_reference = ?)';
+        $params[] = $form;
+        $params[] = $form;
+    }
+
     return db_one(
-        'SELECT * FROM payments WHERE reference = ? OR provider_reference = ? OR provider_reference = ? ORDER BY id DESC LIMIT 1',
-        [$reference, $reference, $clean]
+        'SELECT * FROM payments WHERE ' . implode(' OR ', $where) . ' ORDER BY id DESC LIMIT 1',
+        $params
     );
 }
 
@@ -950,33 +1544,48 @@ function webhook_authorised(string $rawBody, array $headers): array
 
 function handle_webhook_payload(array $payload): array
 {
-    $reference = (string) (
-        $payload['transaction']['reference']
-        ?? $payload['transactionReference']
-        ?? $payload['reference']
-        ?? $payload['data']['reference']
-        ?? ''
-    );
-    $amountRaw = $payload['order']['amount']
-        ?? $payload['transaction']['amount']
-        ?? $payload['amount']
-        ?? $payload['data']['amount']
-        ?? 0;
-    $amount = (int) round((float) str_replace(',', '', (string) $amountRaw));
+    $reference = (string) (payment_extract_by_paths($payload, [
+        'data.reference', 'transaction.reference', 'transactionReference', 'transaction_reference', 'reference',
+    ]) ?? '');
+    $statusRaw = payment_extract_by_paths($payload, [
+        'data.status', 'transaction.status', 'status', 'paymentStatus', 'transactionStatus', 'event',
+    ]);
+    $status = strtolower(trim((string) ($statusRaw ?? '')));
+    $kind = $status === '' ? 'unknown' : payment_status_kind($status);
+    $amount = payment_verify_amount(payment_extract_by_paths($payload, [
+        'order.amount', 'transaction.amount', 'data.amount', 'amount', 'transactionAmount', 'totalAmount',
+    ]));
 
-    if ($reference === '' || $amount <= 0) {
-        return ['ok' => false, 'message' => 'reference and amount are required.'];
+    if ($reference === '') {
+        return ['ok' => false, 'message' => 'reference is required.'];
     }
 
     $payment = find_payment_by_reference($reference);
     if (!$payment) {
-        record_payment_event($reference, null, $amount, 'UNMATCHED', $payload);
+        record_payment_event($reference, null, $amount ?? 0, 'UNMATCHED', $payload);
+        log_warning('Unknown payment reference on webhook', ['reference' => $reference]);
         return ['ok' => true, 'status' => 'unmatched'];
     }
 
     if ($payment['status'] === 'VERIFIED') {
-        record_payment_event($reference, (int) $payment['id'], $amount, 'DUPLICATE_PAYMENT', $payload);
+        record_payment_event($reference, (int) $payment['id'], $amount ?? 0, 'DUPLICATE_PAYMENT', ['source' => 'webhook']);
         return ['ok' => true, 'status' => 'duplicate_payment'];
+    }
+
+    if ($kind === 'failed') {
+        mark_payment_failed($payment, 'Gateway webhook status: ' . $status);
+        return ['ok' => true, 'status' => 'failed'];
+    }
+    if ($kind === 'pending') {
+        return ['ok' => true, 'status' => 'pending'];
+    }
+    if ($kind !== 'paid') {
+        // Unknown status: never guess. Reconcile against the gateway instead.
+        $settled = settle_payment_with_gateway($payment);
+        return ['ok' => $settled['ok'], 'status' => $settled['state'], 'message' => $settled['message']];
+    }
+    if ($amount === null) {
+        return ['ok' => false, 'message' => 'amount is required for a paid event.'];
     }
 
     $result = mark_payment_verified($payment, $reference, $amount, 'webhook');
@@ -988,44 +1597,46 @@ function handle_callback(string $reference): array
 {
     $payment = find_payment_by_reference($reference);
     if (!$payment) {
-        return ['ok' => false, 'state' => 'error', 'message' => 'We could not find a payment with that reference.'];
+        log_warning('Unknown payment reference on callback', ['reference' => $reference]);
+        return [
+            'ok'      => false,
+            'state'   => 'error',
+            'message' => 'We could not find a payment with that reference. If you were charged, contact support with the reference.',
+        ];
     }
 
-    if ($payment['status'] === 'VERIFIED') {
-        return ['ok' => true, 'state' => 'verified', 'payment' => $payment];
+    // Completed states are idempotent: never verify or issue anything twice.
+    if (in_array($payment['status'], ['VERIFIED', 'COMPLETED'], true)) {
+        return ['ok' => true, 'state' => 'verified', 'payment' => $payment, 'message' => 'This payment is already confirmed.'];
     }
 
-    if (payment_mode() === 'hosted') {
-        $verified = hosted_verify($payment['provider_reference'] ?: $reference);
-        if ($verified['ok']) {
-            if ($verified['amount'] > 0 && $verified['amount'] < (int) $payment['amount']) {
-                mark_payment_failed($payment, 'Amount mismatch: gateway returned ' . $verified['amount']);
-                return ['ok' => false, 'state' => 'failed', 'message' => 'The amount paid does not match this registration.'];
-            }
-            $result = mark_payment_verified($payment, (string) ($verified['reference'] ?? $reference), (int) $verified['amount'], 'callback');
-            if ($result['ok']) {
-                return ['ok' => true, 'state' => 'verified', 'payment' => db_one('SELECT * FROM payments WHERE id = ?', [$payment['id']])];
-            }
-            return ['ok' => false, 'state' => 'failed', 'message' => $result['message']];
-        }
-        if (!empty($verified['pending'])) {
-            return ['ok' => false, 'state' => 'pending', 'message' => $verified['message'], 'payment' => $payment];
-        }
-        if (!empty($verified['failed'])) {
-            mark_payment_failed($payment, (string) ($verified['message'] ?? 'Gateway reported failure.'));
-            return ['ok' => false, 'state' => 'failed', 'message' => $verified['message'], 'payment' => $payment];
-        }
-        return ['ok' => false, 'state' => 'pending', 'message' => $verified['message'], 'payment' => $payment];
+    // Failed / cancelled / refunded are terminal. Do not re-verify or unlock.
+    if (in_array($payment['status'], ['FAILED', 'CANCELLED', 'REFUNDED'], true)) {
+        return [
+            'ok'      => false,
+            'state'   => 'failed',
+            'message' => (string) ($payment['failure_reason'] ?: 'This payment was not completed.'),
+            'payment' => $payment,
+        ];
     }
 
-    // Mock and manual payments are confirmed by the mock gateway or an admin.
-    return ['ok' => true, 'state' => 'pending', 'payment' => $payment, 'message' => 'Payment is awaiting confirmation.'];
+    return settle_payment_with_gateway($payment);
 }
 
 /* ── Logging ─────────────────────────────────────────────────────────── */
 function log_error(string $message, array $context = []): void
 {
-    $line = '[' . now() . '] ' . $message;
+    log_line('ERROR', $message, $context);
+}
+
+function log_warning(string $message, array $context = []): void
+{
+    log_line('WARN', $message, $context);
+}
+
+function log_line(string $level, string $message, array $context = []): void
+{
+    $line = '[' . now() . '] ' . $level . ' ' . $message;
     if ($context !== []) {
         $line .= ' ' . json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }

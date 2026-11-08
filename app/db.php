@@ -171,6 +171,7 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
             bulk_order_id INT NULL,
             reference VARCHAR(191) NOT NULL UNIQUE,
             provider_reference VARCHAR(191) NULL,
+            access_code VARCHAR(191) NULL,
             amount INT NOT NULL,
             payment_type VARCHAR(16) NOT NULL,
             installment_number INT NULL,
@@ -286,7 +287,7 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
     /* ── Lightweight in-place upgrades for existing databases ── */
     $requiredColumns = [
         'participants' => ['profile_completed' => 'INT NOT NULL DEFAULT 1'],
-        'payments'     => ['bulk_order_id' => 'INT NULL'],
+        'payments'     => ['bulk_order_id' => 'INT NULL', 'access_code' => 'VARCHAR(191) NULL'],
     ];
     foreach ($requiredColumns as $table => $columns) {
         foreach ($columns as $column => $definition) {
@@ -303,6 +304,7 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
         'CREATE INDEX idx_participants_payment ON participants (payment_status)',
         'CREATE INDEX idx_participants_created ON participants (created_at)',
         'CREATE INDEX idx_payments_participant ON payments (participant_id)',
+        'CREATE INDEX idx_payments_provider_ref ON payments (provider_reference)',
         'CREATE INDEX idx_payments_status ON payments (status)',
         'CREATE INDEX idx_payments_account ON payments (virtual_account_number)',
         'CREATE INDEX idx_payments_bulk ON payments (bulk_order_id)',

@@ -70,7 +70,7 @@ The interface, brand system and user journeys were extracted from the SB HIC Nex
 - Secrets only in `.env`; never rendered in HTML.
 - Payment verification always server-side; callbacks and webhook are idempotent.
 - Soft deletes for delegates.
-- Underpayment, duplicate payments and amount mismatches are rejected/logged.
+- Underpayment, overpayment, duplicate payments and amount/access-code mismatches are rejected and logged.
 - Mail/Telegram-style alerts never block a registration (mail is optional).
 - Transactional SQLite/MySQL schema installer.
 
@@ -155,7 +155,7 @@ PAYMENT_MODE=manual    # bank transfer + admin approval
 PAYMENT_MODE=hosted    # live PayVessel / PayFlow checkout
 ```
 
-For a live deployment set `PAYMENT_MODE=hosted`, add live keys and callback URL, then confirm a small live transaction before opening registration. The mock route returns 404 whenever the mode is not `mock`.
+For a live deployment set `PAYMENT_MODE=hosted`, add live keys and callback URL, then confirm a small live transaction before opening registration. The mock route returns 404 whenever the mode is not `mock`, and is always refused when `APP_ENV=production`.
 
 ### 5.1 Mock (default, safe for local testing)
 
@@ -192,13 +192,15 @@ PAYMENT_WEBHOOK_ALLOWED_IPS=3.255.23.38,162.246.254.36
 
 Contract implemented in `app/payments.php`:
 
-- `POST {PAYMENT_BASE_URL}/api/authorize` with `api-key` + `Authorization: Bearer …`.
-- Body: `email`, `amount` (naira), `callback`, `name`, `phone`, `tickets` (our reference).
-- Response: `data.authorization_url` / `data.checkout_url`, `data.reference`, `data.access_code`.
-- `GET {PAYMENT_BASE_URL}/api/verify/TXN{reference}` with the same headers.
-- Verification is server-side; amount and status are checked; pending is rejected unless `PAYMENT_ALLOW_PENDING=true`.
-- Callback: `GET /index.php?r=payment/callback&reference=…`.
-- Webhook: `POST /index.php?r=payment/webhook` with the HMAC-SHA512 signature header (default `Payvessel-Http-Signature`). Optional IP allowlist. Duplicate deliveries are recorded as `DUPLICATE_PAYMENT` and never double-credit.
+- `POST {PAYMENT_BASE_URL}/api/authorize` with `api-key` + `Authorization: Bearer …` (header names and scheme configurable).
+- Body: `email`, `amount` (naira by default; set `PAYMENT_AMOUNT_UNIT=minor` to send kobo), `callback`, `tickets` (our reference).
+- Response: `data.authorization_url` / `data.checkout_url` (plus common aliases), `data.reference`, `data.access_code`. Redirect URLs are validated as absolute `http`/`https` before use.
+- `GET {PAYMENT_BASE_URL}/api/verify/TXN{reference}` with the same headers. The `TXN` prefix is configurable via `PAYMENT_VERIFY_REFERENCE_PREFIX`.
+- Verification is server-side and tolerant of the gateway's field aliases. The amount must match exactly (missing amount is rejected, not treated as zero); access codes are compared in constant time. Pending is rejected unless `PAYMENT_ALLOW_PENDING=true`.
+- Callback: `GET /index.php?r=payment/callback&reference=…` or `?trxref=`, `?paymentReference=`, `?transaction_ref=`, `?transactionRef=`, `?ref=`, plus the path form `/payment/callback/{reference}`. The callback is public, rate-limited and never trusts the query string for paid/amount.
+- Opening `/complete/{token}` or the portal after a closed gateway tab re-runs verification for pending hosted payments. Admins can also press **Re-verify** on a pending gateway payment.
+- Webhook: `POST /index.php?r=payment/webhook` with the HMAC-SHA512 signature header (default `Payvessel-Http-Signature`). Optional IP allowlist. Duplicate deliveries are recorded as `DUPLICATE_PAYMENT` and never double-credit. Failed/pending statuses are applied rather than blindly marking the order paid.
+- The sandbox is refused when `APP_ENV=production`, so a live deployment can never let a buyer mark their own order paid via `PAYMENT_MODE=mock`.
 
 No secret is displayed in the admin UI. Settings shows only “configured / not configured”.
 

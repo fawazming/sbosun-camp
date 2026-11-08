@@ -76,6 +76,13 @@ $query = $_GET; unset($query['r']);
                   <input type="hidden" name="action" value="approve">
                   <button class="btn btn-green btn-sm" type="submit">Approve</button>
                 </form>
+                <?php if (($p['provider'] ?? '') === 'payvessel'): ?>
+                  <form method="post" action="<?= e(url('admin/payments/' . $p['id'] . '/action')) ?>" style="margin-top:4px">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="reverify">
+                    <button class="btn btn-outline-green btn-sm" type="submit">Re-verify</button>
+                  </form>
+                <?php endif; ?>
               <?php elseif ($p['status'] === 'VERIFIED' && admin_can(['FINANCE_ADMIN'])): ?>
                 <details>
                   <summary class="small" style="color:var(--red);font-weight:800;cursor:pointer">Refund</summary>

@@ -30,6 +30,7 @@ return [
     ['GET',  'pay/mock/{reference}',          'page_mock_gateway'],
     ['POST', 'pay/mock/{reference}',          'mock_gateway_action'],
     ['GET',  'payment/callback',              'page_callback'],
+    ['GET',  'payment/callback/{reference}',  'page_callback'],
     ['POST', 'payment/webhook',               'payment_webhook'],
     ['GET',  'status',                        'page_status'],
     ['POST', 'status',                        'lookup_status'],

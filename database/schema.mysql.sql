@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS payments (
   bulk_order_id INT NULL,
   reference VARCHAR(191) NOT NULL UNIQUE,
   provider_reference VARCHAR(191) NULL,
+  access_code VARCHAR(191) NULL,
   amount INT NOT NULL,
   payment_type VARCHAR(16) NOT NULL,
   installment_number INT NULL,
@@ -110,6 +111,7 @@ CREATE TABLE IF NOT EXISTS payments (
   created_at DATETIME NOT NULL,
   updated_at DATETIME NULL,
   INDEX idx_payments_participant (participant_id),
+  INDEX idx_payments_provider_ref (provider_reference),
   INDEX idx_payments_status (status),
   INDEX idx_payments_account (virtual_account_number),
   INDEX idx_payments_bulk (bulk_order_id)
