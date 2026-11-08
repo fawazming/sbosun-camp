@@ -24,6 +24,7 @@ function send_mail(string $to, string $subject, string $html, string $text = '')
 
     $fromEmail = (string) config('mail.from_email', 'no-reply@sbosun.org');
     $fromName = (string) config('mail.from_name', 'SB Osun');
+    $subject = trim(str_replace(["\r", "\n"], ' ', $subject));
     $boundary = 'sb-' . bin2hex(random_bytes(8));
 
     $headers = [

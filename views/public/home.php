@@ -217,7 +217,7 @@ $lecturers = [
 
             <div data-panel="quranic" hidden>
               <div class="player-meta"><span>QURANIC COMPETITIONS (MUSABAQOH)</span><span>STATUS: LIVE STREAM / REPLAY</span></div>
-              <div class="player-media"><video src="<?= e(asset('videos/camp_feature_8.mp4')) ?>" controls autoplay playsinline loop preload="metadata"></video></div>
+              <div class="player-media"><video src="<?= e(asset('videos/camp_feature_8.mp4')) ?>" controls muted autoplay playsinline loop preload="metadata"></video></div>
               <div class="player-caption">🔊 Press play to hear the soul-stirring recitations of our Quranic contestants</div>
             </div>
 

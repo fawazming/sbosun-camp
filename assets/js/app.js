@@ -5,6 +5,13 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+  /* Homepage media starts muted; visitors can still unmute with the player controls. */
+  $$('video').forEach((video) => {
+    video.muted = true;
+    video.defaultMuted = true;
+    video.setAttribute('muted', '');
+  });
+
   /* Mobile navigation */
   $$('[data-mobile-toggle]').forEach((btn) => {
     btn.addEventListener('click', () => {

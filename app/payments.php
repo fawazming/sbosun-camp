@@ -348,14 +348,16 @@ function mark_payment_verified(array $payment, string $providerReference, int $a
             return ['ok' => false, 'result' => 'underpaid', 'message' => 'Amount received is less than the amount due.'];
         }
 
-        db_update('payments', [
-            'status'             => 'VERIFIED',
-            'provider_reference' => $providerReference,
-            'paid_at'            => now(),
-            'verified_at'        => now(),
-            'failure_reason'     => null,
-            'updated_at'         => now(),
-        ], 'id = ?', [$fresh['id']]);
+        $updated = db_exec(
+            "UPDATE payments SET status = 'VERIFIED', provider_reference = ?, paid_at = ?, verified_at = ?,
+             failure_reason = NULL, updated_at = ? WHERE id = ? AND status <> 'VERIFIED'",
+            [$providerReference, now(), now(), now(), $fresh['id']]
+        );
+        if ($updated === 0) {
+            record_payment_event($providerReference, (int) $fresh['id'], $amount, 'DUPLICATE_PAYMENT', ['source' => $source]);
+            $pdo->commit();
+            return ['ok' => true, 'result' => 'already', 'message' => 'Payment was already verified.'];
+        }
 
         record_payment_event($providerReference, (int) $fresh['id'], $amount, 'MATCHED', ['source' => $source]);
 

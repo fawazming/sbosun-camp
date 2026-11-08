@@ -308,7 +308,11 @@ function admin_payment_action(array $params): void
             flash('error', 'Only verified payments can be refunded.');
         } else {
             db_update('payments', ['status' => 'REFUNDED', 'failure_reason' => 'Refund: ' . $reason, 'updated_at' => now()], 'id = ?', [$payment['id']]);
-            refresh_participant_payment((int) $payment['participant_id']);
+            $updatedParticipant = refresh_participant_payment((int) $payment['participant_id']);
+            if (($updatedParticipant['payment_status'] ?? '') !== 'FULLY_PAID' && !empty($updatedParticipant['house_id'])) {
+                db_update('participants', ['house_id' => null], 'id = ?', [$updatedParticipant['id']]);
+                audit('RELEASE_HOUSE', 'participant', (string) $updatedParticipant['id'], ['house_id' => $updatedParticipant['house_id']], ['reason' => 'refund']);
+            }
             audit('REFUND_PAYMENT', 'payment', (string) $payment['reference'], ['status' => 'VERIFIED'], ['status' => 'REFUNDED', 'reason' => $reason, 'admin' => $admin['name']]);
             flash('success', 'Refund recorded and participant balance recalculated.');
         }
@@ -596,6 +600,17 @@ function admin_settings_save(): void
     $admin = require_admin(['SUPER_ADMIN']);
     verify_csrf();
 
+    $early = (int) post('early_bird_fee');
+    $flat = (int) post('flat_fee');
+    if ($early <= 0 || $flat <= 0 || $flat < $early) {
+        flash('error', 'Fees must be positive and the flat rate cannot be lower than the early-bird rate.');
+        redirect_route('admin/settings');
+    }
+    if (!valid_email((string) post('support_email'))) {
+        flash('error', 'Enter a valid support email address.');
+        redirect_route('admin/settings');
+    }
+
     $fields = [
         'name', 'year', 'camp_start', 'camp_end', 'venue_name', 'venue_address',
         'early_bird_fee', 'flat_fee', 'early_bird_deadline', 'default_house_capacity',
@@ -609,13 +624,6 @@ function admin_settings_save(): void
     }
     save_setting('registration_open', post('registration_open') ? '1' : '0');
     save_setting('maintenance_mode', post('maintenance_mode') ? '1' : '0');
-
-    $early = (int) post('early_bird_fee');
-    $flat = (int) post('flat_fee');
-    if ($early <= 0 || $flat <= 0 || $flat < $early) {
-        flash('error', 'Fees must be positive and the flat rate cannot be lower than the early-bird rate.');
-        redirect_route('admin/settings');
-    }
 
     audit('UPDATE_SETTINGS', 'settings', 'programme', null, ['admin' => $admin['name']]);
     flash('success', 'Settings saved.');
@@ -699,7 +707,14 @@ function csv_download(string $filename, array $headers, array $rows): never
     fwrite($out, "\xEF\xBB\xBF");
     fputcsv($out, $headers);
     foreach ($rows as $row) {
-        fputcsv($out, array_map(static fn($value) => is_scalar($value) || $value === null ? (string) $value : json_encode($value), $row));
+        fputcsv($out, array_map(static function ($value): string {
+            $value = is_scalar($value) || $value === null ? (string) $value : (string) json_encode($value);
+            // Guard against spreadsheet formula injection.
+            if ($value !== '' && in_array($value[0], ['=', '+', '-', '@'], true)) {
+                $value = "'" . $value;
+            }
+            return $value;
+        }, $row));
     }
     fclose($out);
     exit;
