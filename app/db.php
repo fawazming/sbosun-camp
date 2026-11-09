@@ -173,6 +173,7 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
             provider_reference VARCHAR(191) NULL,
             access_code VARCHAR(191) NULL,
             amount INT NOT NULL,
+            gateway_charge INT NOT NULL DEFAULT 0,
             payment_type VARCHAR(16) NOT NULL,
             installment_number INT NULL,
             plan_rate VARCHAR(16) NOT NULL,
@@ -287,7 +288,7 @@ function install_database(string $adminEmail = '', string $adminPassword = '', s
     /* ── Lightweight in-place upgrades for existing databases ── */
     $requiredColumns = [
         'participants' => ['profile_completed' => 'INT NOT NULL DEFAULT 1'],
-        'payments'     => ['bulk_order_id' => 'INT NULL', 'access_code' => 'VARCHAR(191) NULL'],
+        'payments'     => ['bulk_order_id' => 'INT NULL', 'access_code' => 'VARCHAR(191) NULL', 'gateway_charge' => 'INT NOT NULL DEFAULT 0'],
     ];
     foreach ($requiredColumns as $table => $columns) {
         foreach ($columns as $column => $definition) {
@@ -436,3 +437,118 @@ function db_table_row_count(string $table): int
         return 0;
     }
 }
+
+/* ── SQL dump (portable, works for SQLite and MySQL) ─────────────────── */
+function db_quote_identifier(string $identifier): string
+{
+    if (($GLOBALS['config']['db']['driver'] ?? 'sqlite') === 'mysql') {
+        return '`' . str_replace('`', '``', $identifier) . '`';
+    }
+    return '"' . str_replace('"', '""', $identifier) . '"';
+}
+
+function db_sql_literal(mixed $value): string
+{
+    if ($value === null) {
+        return 'NULL';
+    }
+    if (is_bool($value)) {
+        return $value ? '1' : '0';
+    }
+    if (is_int($value) || is_float($value)) {
+        return (string) $value;
+    }
+    $quoted = db()->quote((string) $value);
+    if ($quoted === false) {
+        return "'" . str_replace("'", "''", (string) $value) . "'";
+    }
+    return $quoted;
+}
+
+function db_dump_table_schema(string $table): string
+{
+    if (($GLOBALS['config']['db']['driver'] ?? 'sqlite') === 'sqlite') {
+        return trim((string) db_value(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            [$table],
+            ''
+        ));
+    }
+    try {
+        $row = db_one('SHOW CREATE TABLE ' . db_quote_identifier($table));
+        if (is_array($row)) {
+            foreach ($row as $key => $value) {
+                if (stripos((string) $key, 'create') !== false) {
+                    return (string) $value;
+                }
+            }
+            $values = array_values($row);
+            return (string) ($values[1] ?? '');
+        }
+    } catch (Throwable $e) {
+        log_error('Could not read table schema for dump: ' . $e->getMessage(), ['table' => $table]);
+    }
+    return '';
+}
+
+/** Write a complete restorable SQL dump to an open stream. */
+function db_dump_write($out): void
+{
+    $pdo = db();
+    $driver = (string) ($GLOBALS['config']['db']['driver'] ?? 'sqlite');
+    $tables = db_tables();
+    $appName = (string) setting('name', config('app.name', 'Camp portal'));
+
+    fwrite($out, "-- {$appName} database dump\n");
+    fwrite($out, "-- Driver: {$driver}\n");
+    fwrite($out, '-- Generated: ' . date('c') . "\n\n");
+
+    if ($driver === 'mysql') {
+        fwrite($out, "SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS = 0;\n\n");
+    } else {
+        fwrite($out, "PRAGMA foreign_keys = OFF;\nBEGIN TRANSACTION;\n\n");
+    }
+
+    foreach ($tables as $table) {
+        $schema = db_dump_table_schema($table);
+        if ($schema === '') {
+            continue;
+        }
+        $quotedTable = db_quote_identifier($table);
+        fwrite($out, "DROP TABLE IF EXISTS {$quotedTable};\n{$schema};\n\n");
+
+        $stmt = $pdo->query("SELECT * FROM {$quotedTable}");
+        if ($stmt) {
+            $columnSql = null;
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                if ($columnSql === null) {
+                    $columnSql = implode(', ', array_map('db_quote_identifier', array_keys($row)));
+                }
+                $values = [];
+                foreach ($row as $value) {
+                    $values[] = db_sql_literal($value);
+                }
+                fwrite($out, "INSERT INTO {$quotedTable} ({$columnSql}) VALUES (" . implode(', ', $values) . ");\n");
+            }
+        }
+        fwrite($out, "\n");
+    }
+
+    if ($driver === 'mysql') {
+        fwrite($out, "SET FOREIGN_KEY_CHECKS = 1;\n");
+    } else {
+        $objects = db_all(
+            "SELECT sql FROM sqlite_master
+             WHERE type IN ('index','trigger') AND sql IS NOT NULL
+             ORDER BY type, name"
+        );
+        foreach ($objects as $object) {
+            $sql = trim((string) ($object['sql'] ?? ''));
+            if ($sql !== '') {
+                fwrite($out, $sql . ";\n");
+            }
+        }
+        fwrite($out, "COMMIT;\n");
+    }
+}
+

@@ -286,6 +286,19 @@ function current_fee(): int
         : (int) setting('flat_fee', 12000);
 }
 
+/** Number of instalments configured in Admin → Settings. */
+function installment_count(): int
+{
+    $count = (int) setting('installment_count', 10);
+    return max(1, min(60, $count));
+}
+
+/** Charge added to every payment transaction (each instalment/full/seat). */
+function gateway_charge(): int
+{
+    return max(0, (int) setting('gateway_charge', 150));
+}
+
 function camp_dates(): string
 {
     $start = strtotime((string) setting('camp_start'));

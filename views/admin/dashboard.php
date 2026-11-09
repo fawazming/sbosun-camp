@@ -42,7 +42,7 @@ foreach ($byZone as $z) { $maxZone = max($maxZone, (int) $z['total']); }
     <div class="kv"><span>Pending transactions</span><span><?= number_format($stats['pending_tx']) ?></span></div>
     <div class="kv"><span>Registrations today</span><span><?= number_format($stats['today']) ?></span></div>
     <div class="kv"><span>Early-bird deadline</span><span><?= e(nice_datetime((string) setting('early_bird_deadline'))) ?></span></div>
-    <div class="kv"><span>Pricing phase</span><span><span class="badge badge-<?= phase() === 'EARLY_BIRD' ? 'gold' : 'slate' ?>"><?= e(phase_label()) ?> · <?= money(current_fee()) ?></span></span></div>
+    <div class="kv"><span>Pricing phase</span><span><span class="badge badge-<?= phase() === 'EARLY_BIRD' ? 'gold' : 'slate' ?>"><?= e(phase_label()) ?> · <?= money(current_fee() + gateway_charge()) ?></span></span></div>
     <div class="kv"><span>Payment mode</span><span><span class="badge badge-slate"><?= e(payment_mode()) ?></span></span></div>
   </section>
   <section class="panel">

@@ -1,8 +1,9 @@
 <?php
 $early = phase() === 'EARLY_BIRD';
-$fee = current_fee();
-$flat = (int) setting('flat_fee', 12000);
-$earlyFee = (int) setting('early_bird_fee', 8500);
+$charge = gateway_charge();
+$fee = current_fee() + $charge;
+$flat = (int) setting('flat_fee', 12000) + $charge;
+$earlyFee = (int) setting('early_bird_fee', 8500) + $charge;
 $deadline = nice_date((string) setting('early_bird_deadline'), 'j F');
 $campStart = (string) setting('camp_start');
 $campDates = camp_dates();
@@ -71,11 +72,11 @@ $lecturers = [
         <div class="rate-card">
           <p class="rate-label"><?= $early ? 'Early Bird Rate' : 'Camp Rate' ?></p>
           <p class="rate-value"><?= money($fee) ?> <?php if ($early): ?><span class="rate-was"><?= money($flat) ?></span><?php endif; ?></p>
-          <p class="rate-note"><span data-countdown="<?= e($campStart) ?>"></span><?= $early ? ' · Closes ' . e($deadline) : ' · Registration open through camp' ?></p>
+          <p class="rate-note"><span data-countdown="<?= e($campStart) ?>"></span><?= $early ? ' · Closes ' . e($deadline) : ' · Registration open through camp' ?> · includes <?= money($charge) ?> gateway charge</p>
         </div>
         <div class="plan-card">
           <p class="plan-label">Pay how it suits you</p>
-          <p class="plan-title">Full payment or 10 instalments</p>
+          <p class="plan-title">Full payment or <?= installment_count() ?> instalments</p>
           <p class="plan-note"><?= $early ? 'Instalment plan must be completed before ' . e($deadline) : 'Instalments close when early bird ends — pay in full to secure your place.' ?></p>
         </div>
       </div>

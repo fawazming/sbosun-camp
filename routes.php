@@ -67,5 +67,6 @@ return [
     ['POST', 'admin/newsletter/action',       'admin_newsletter_action'],
     ['GET',  'admin/bulk',                    'admin_bulk'],
     ['GET',  'admin/database',                'admin_database'],
+    ['GET',  'admin/database/dump',           'admin_database_dump'],
     ['POST', 'admin/database/query',          'admin_database_query'],
 ];

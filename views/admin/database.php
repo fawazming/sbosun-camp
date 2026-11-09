@@ -10,6 +10,7 @@ $query = $_GET; unset($query['r'], $query['page'], $query['table']);
   <div class="bulk-actions">
     <span class="badge badge-slate"><?= count($tables) ?> tables</span>
     <span class="badge badge-amber">Read-only</span>
+    <a class="btn btn-green btn-sm" href="<?= e(url('admin/database/dump')) ?>">Download SQL dump</a>
   </div>
 </div>
 

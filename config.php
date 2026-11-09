@@ -119,13 +119,27 @@ return [
         'camp_end'             => '2026-12-28',
         'venue_name'           => 'Oduduwa College',
         'venue_address'        => 'Ile-Ife, Osun State',
-        'early_bird_fee'       => 8650,
-        'flat_fee'             => 12150,
+        'early_bird_fee'       => 8500,
+        'flat_fee'             => 12000,
         'early_bird_deadline'  => '2026-11-30 23:59:59',
+        // Added to every payment transaction: each instalment, each full
+        // payment and each bulk seat. Base fees stay clean.
+        'installment_count'    => 10,
+        'gateway_charge'       => 150,
         'default_house_capacity' => 40,
         'registration_open'    => '1',
         'support_email'        => 'support@sbosun.org',
         'support_phone'        => '09053444178',
+    ],
+
+    'telegram' => [
+        'enabled'   => filter_var(env_value('TELEGRAM_ENABLED', 'false'), FILTER_VALIDATE_BOOLEAN),
+        'bot_token' => (string) env_value('TELEGRAM_BOT_TOKEN', ''),
+        'chat_ids'  => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env_value('TELEGRAM_CHAT_ID', ''))
+        ))),
+        'timeout'   => (int) env_value('TELEGRAM_TIMEOUT', 10),
     ],
 
     'classes' => [

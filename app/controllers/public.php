@@ -178,7 +178,7 @@ function submit_register(): void
         'profile_completed' => 0,
         'payment_status'    => 'NOT_PAID',
         'attendance_status' => 'NOT_ARRIVED',
-        'amount_owed'       => current_fee(),
+        'amount_owed'       => current_fee() + gateway_charge(),
         'amount_paid'       => 0,
         'created_at'        => now(),
         'updated_at'        => now(),
@@ -380,7 +380,7 @@ function page_bulk_register(): void
     require_public_open();
     view('public/bulk', [
         'title'      => 'Bulk registration — ' . setting('name', 'SB HIC 2026'),
-        'fee'        => current_fee(),
+        'fee'        => current_fee() + gateway_charge(),
         'categories' => categories(),
         'phase'      => phase_label(),
     ], 'layout');
@@ -648,6 +648,7 @@ function submit_complete_ticket(array $params): void
             'account_name'           => null,
             'bank_name'              => null,
             'checkout_url'           => null,
+            'gateway_charge'         => 0,
             'paid_at'                => $order['paid_at'] ?: now(),
             'verified_at'            => now(),
             'created_at'             => now(),

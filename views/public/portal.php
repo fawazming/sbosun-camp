@@ -4,6 +4,8 @@ if ($displayName === '') {
     $displayName = $participant['email'];
 }
 $startedInstallments = has_installment_plan((int) $participant['id']);
+$installmentCount = installment_count();
+$fullPayAmount = full_payment_amount($participant);
 $pending = null;
 foreach ($payments as $p) {
     if ($p['status'] === 'PENDING') { $pending = $p; break; }
@@ -87,14 +89,14 @@ $waMessage = rawurlencode(
         <div class="balance-row"><span class="muted">Paid so far</span><span class="mono" style="font-weight:800;color:var(--green)"><?= money($paid) ?></span></div>
         <div class="balance-row total"><span>Balance</span><span class="mono"><?= money($balance) ?></span></div>
         <?php if ($startedInstallments): ?>
-          <p class="small muted" style="margin-top:6px">Instalment plan started · <?= verified_installment_count((int) $participant['id']) ?> of <?= INSTALLMENT_COUNT ?> confirmed. Amounts adjust automatically if the general camp fee changes.</p>
+          <p class="small muted" style="margin-top:6px">Instalment plan started · <?= verified_installment_count((int) $participant['id']) ?> of <?= $installmentCount ?> confirmed. Amounts adjust automatically if the general camp fee changes.</p>
         <?php endif; ?>
 
         <?php if ($showPayment && $showPayment['status'] === 'PENDING'): ?>
           <div style="margin-top:16px">
             <?php if ($mode === 'manual'): ?>
               <div class="transfer-box">
-                <p class="tb-label"><?= e($showPayment['payment_type'] === 'INSTALLMENT' ? 'Instalment ' . $showPayment['installment_number'] . '/' . INSTALLMENT_COUNT : 'Payment') ?> — transfer exactly</p>
+                <p class="tb-label"><?= e($showPayment['payment_type'] === 'INSTALLMENT' ? 'Instalment ' . $showPayment['installment_number'] . '/' . $installmentCount : 'Payment') ?> — transfer exactly</p>
                 <p class="tb-amount"><?= money((int) $showPayment['amount']) ?></p>
                 <div class="transfer-row"><span>Bank</span><strong><?= e($showPayment['bank_name'] ?: config('payment.manual_bank', 'Bank')) ?></strong></div>
                 <div class="transfer-row"><span>Account name</span><strong><?= e($showPayment['account_name'] ?: config('payment.manual_account_name', '')) ?></strong></div>
@@ -132,8 +134,8 @@ $waMessage = rawurlencode(
           <div style="margin-top:18px">
             <?php if ($quote !== null): ?>
               <div class="notice notice-amber" style="margin-bottom:10px">
-                Next instalment <?= (int) $quote['slot'] ?>/<?= INSTALLMENT_COUNT ?>: <strong><?= money((int) $quote['amount']) ?></strong>
-                (<?= (int) $quote['slots_left'] ?> payment<?= (int) $quote['slots_left'] === 1 ? '' : 's' ?> left, recalculated from your balance).
+                Next instalment <?= (int) $quote['slot'] ?>/<?= $installmentCount ?>: <strong><?= money((int) $quote['amount']) ?></strong>
+                (<?= (int) $quote['slots_left'] ?> payment<?= (int) $quote['slots_left'] === 1 ? '' : 's' ?> left, includes <?= money((int) $quote['charge']) ?> gateway charge).
               </div>
               <div style="display:flex;gap:8px;flex-wrap:wrap">
                 <form method="post" action="<?= e(url('pay/start')) ?>" style="flex:1;min-width:190px">
@@ -147,7 +149,7 @@ $waMessage = rawurlencode(
                   <?= csrf_field() ?>
                   <input type="hidden" name="token" value="<?= e($participant['token']) ?>">
                   <input type="hidden" name="payment_type" value="FULL">
-                  <button class="btn btn-outline-green btn-block" type="submit">Pay full balance · <?= money($balance) ?></button>
+                  <button class="btn btn-outline-green btn-block" type="submit">Pay full balance · <?= money($fullPayAmount ?? $balance) ?></button>
                 </form>
               </div>
             <?php else: ?>
@@ -158,7 +160,7 @@ $waMessage = rawurlencode(
                 <button class="btn btn-green btn-block" type="submit">Pay full balance · <?= money($balance) ?></button>
               </form>
             <?php endif; ?>
-            <p class="small muted" style="margin-top:7px">The server calculates the amount from the current pricing phase. Browser-submitted prices are never trusted.</p>
+            <p class="small muted" style="margin-top:7px">The server calculates the amount from the current pricing phase. Every instalment carries one gateway charge; paying the full balance consolidates the remaining instalments into a single charge.</p>
           </div>
         <?php elseif ($profileCompleted): ?>
           <div class="notice notice-green" style="margin-top:16px">✓ You are fully paid. Your house and ID card are ready.</div>
@@ -178,7 +180,7 @@ $waMessage = rawurlencode(
               <?php foreach ($payments as $p): ?>
                 <div class="pay-row">
                   <div>
-                    <p class="pr-main"><?= $p['payment_type'] === 'FULL' ? 'Full payment' : ($p['payment_type'] === 'BULK' ? 'Bulk payment' : 'Instalment ' . e((string) $p['installment_number']) . '/' . INSTALLMENT_COUNT) ?></p>
+                    <p class="pr-main"><?= $p['payment_type'] === 'FULL' ? 'Full payment' : ($p['payment_type'] === 'BULK' ? 'Bulk payment' : 'Instalment ' . e((string) $p['installment_number']) . '/' . $installmentCount) ?></p>
                     <p class="pr-sub"><?= e($p['reference']) ?> · <?= e($p['provider']) ?></p>
                   </div>
                   <div style="text-align:right">

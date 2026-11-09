@@ -1,5 +1,7 @@
 <?php
-$fee = current_fee();
+$baseFee = current_fee();
+$charge = gateway_charge();
+$fee = (int) ($fee ?? ($baseFee + $charge));
 ?>
 <main class="section" style="padding-top:34px">
   <div class="container">
@@ -39,6 +41,8 @@ $fee = current_fee();
         <div class="calc-box">
           <div class="calc-label">🧮 BULK TOTAL</div>
           <div class="calc-card">
+            <div class="calc-row"><span>Camp fee per seat</span><strong><?= money($baseFee) ?></strong></div>
+            <div class="calc-row"><span>Gateway charge per seat</span><span><?= money($charge) ?></span></div>
             <div class="calc-row"><span>Price per seat</span><strong><?= money($fee) ?></strong></div>
             <div class="calc-row"><span>Seats selected</span><strong data-bulk-seats>0</strong></div>
             <div class="calc-row gold"><span>Total to pay</span><span data-bulk-total><?= money(0) ?></span></div>
@@ -87,7 +91,7 @@ $fee = current_fee();
             </div>
 
             <div class="span-12">
-              <div class="notice notice-amber">Bulk orders are paid in full. Delegates who want an instalment plan should register individually.</div>
+              <div class="notice notice-amber">Bulk orders are paid in full. Each seat includes a <?= money($charge) ?> gateway charge. Delegates who want an instalment plan should register individually.</div>
             </div>
 
             <div class="span-12">

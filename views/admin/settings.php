@@ -37,12 +37,14 @@ $endValue = date('Y-m-d', strtotime((string) setting('camp_end')));
     <section class="panel">
       <h2>Fees &amp; pricing phase</h2>
       <div class="form-grid">
-        <div class="field span-6"><label>Early-bird fee (₦)</label><input class="input" type="number" name="early_bird_fee" value="<?= e((string) setting('early_bird_fee')) ?>" min="1" required></div>
-        <div class="field span-6"><label>Flat rate fee (₦)</label><input class="input" type="number" name="flat_fee" value="<?= e((string) setting('flat_fee')) ?>" min="1" required></div>
+        <div class="field span-6"><label>Early-bird fee (₦)</label><input class="input" type="number" name="early_bird_fee" value="<?= e((string) setting('early_bird_fee', 8500)) ?>" min="1" required></div>
+        <div class="field span-6"><label>Flat rate fee (₦)</label><input class="input" type="number" name="flat_fee" value="<?= e((string) setting('flat_fee', 12000)) ?>" min="1" required></div>
+        <div class="field span-6"><label>Number of instalments</label><input class="input" type="number" name="installment_count" value="<?= e((string) installment_count()) ?>" min="1" max="60" required><span class="hint">Used for new plans and to label existing plans.</span></div>
+        <div class="field span-6"><label>Gateway charge per transaction (₦)</label><input class="input" type="number" name="gateway_charge" value="<?= e((string) gateway_charge()) ?>" min="0" required><span class="hint">Added once per instalment, full payment or bulk seat.</span></div>
         <div class="field span-12"><label>Early-bird deadline</label><input class="input" type="datetime-local" name="early_bird_deadline" value="<?= e($deadlineValue) ?>" required></div>
       </div>
       <div class="notice notice-amber" style="margin-top:12px">
-        Current phase: <strong><?= e(phase_label()) ?></strong> · charge now: <strong><?= money(current_fee()) ?></strong>. The server always recalculates the amount; changing these values never affects an already verified payment.
+        Current phase: <strong><?= e(phase_label()) ?></strong> · base fee <strong><?= money(current_fee()) ?></strong> + <strong><?= money(gateway_charge()) ?></strong> gateway charge = <strong><?= money(current_fee() + gateway_charge()) ?></strong> for a single payment. The server always recalculates the amount; changing these values never affects an already verified payment.
       </div>
 
       <h2 style="margin-top:18px">Registration state</h2>
@@ -75,9 +77,10 @@ $endValue = date('Y-m-d', strtotime((string) setting('camp_end')));
 
       <h2 style="margin-top:16px">Integration status</h2>
       <div class="kv"><span>Hosted gateway keys</span><span><span class="<?= e($gateway_ready ? 'badge badge-green' : 'badge badge-amber') ?>"><?= $gateway_ready ? 'Configured' : 'Missing' ?></span></span></div>
+      <div class="kv"><span>Telegram admin alerts</span><span><span class="<?= e($telegram_ready ? 'badge badge-green' : 'badge badge-amber') ?>"><?= $telegram_ready ? 'Configured' : 'Missing' ?></span></span></div>
       <div class="kv"><span>SMTP mail</span><span><span class="<?= e($mail_ready ? 'badge badge-green' : 'badge badge-amber') ?>"><?= $mail_ready ? 'Configured' : 'Missing' ?></span></span></div>
       <div class="kv"><span>Webhook secret</span><span><span class="<?= e(config('payment.webhook_secret') ? 'badge badge-green' : 'badge badge-amber') ?>"><?= config('payment.webhook_secret') ? 'Configured' : 'Missing' ?></span></span></div>
-      <p class="small muted" style="margin-top:9px">Secrets are never rendered in HTML. Edit <span class="mono">.env</span> on the server, then reload this page.</p>
+      <p class="small muted" style="margin-top:9px">Secrets are never rendered in HTML. Edit <span class="mono">.env</span> on the server, then reload this page. Telegram uses <span class="mono">TELEGRAM_ENABLED</span>, <span class="mono">TELEGRAM_BOT_TOKEN</span> and <span class="mono">TELEGRAM_CHAT_ID</span>.</p>
     </section>
   </div>
 

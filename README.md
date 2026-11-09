@@ -28,7 +28,8 @@ The interface, brand system and user journeys were extracted from the SB HIC Nex
   - registration ID + surname (works after the profile is completed).
 - **Bulk registration & payment**: one buyer pays for up to 50 seats; after payment, the buyer portal issues a unique one-time completion link per delegate. Each seat becomes its own participant, portal and ID card.
 - Server-authoritative pricing (early bird vs flat rate); browser-submitted totals are never trusted.
-- **Smarter instalments**: every next amount is quoted from the real outstanding balance and remaining instalments, not by repeatedly dividing the old price. If the general camp fee or phase changes, pending amounts are recalculated; unpaid hosted checkouts are retired and a fresh checkout is started. Full payments lock in the price actually paid.
+- **Smarter instalments**: the number of instalments is configurable in Admin → Settings (default 10). Every next amount is quoted from the real outstanding balance and remaining instalments, includes one gateway charge, and adapts if the general camp fee or phase changes. Unpaid hosted checkouts are retired and a fresh checkout is started. Full payments lock in the price actually paid.
+- **Per-transaction gateway charge**: a configurable charge (default ₦150) is added to every full payment, every instalment, and every bulk seat. The registration page always shows the exact amount before the buyer continues.
 - Payment modes controlled by **`PAYMENT_MODE` in `.env`**:
   - **mock** — sandbox checkout for local testing;
   - **manual** — bank transfer + WhatsApp receipt + finance-admin approval;
@@ -56,7 +57,7 @@ The interface, brand system and user journeys were extracted from the SB HIC Nex
 - Reports: registration, payment, attendance, house and newsletter CSV exports.
 - Newsletter: subscribers, active/total counts, delete, broadcast with per-recipient unsubscribe (SMTP required), CSV export.
 - Admin users: create, role/zone assignment, deactivate/reactivate, password reset.
-- Settings: programme dates/venue/support, fees, early-bird deadline, house capacity, registration state, maintenance mode, payment mode, manual bank details.
+- Settings: programme dates/venue/support, fees, instalment count, gateway charge, early-bird deadline, house capacity, registration state, maintenance mode, payment mode, manual bank details.
 - Audit log: logins, failed logins, exports, approvals, refunds, check-ins, house assignment, settings changes.
 
 ### Security / reliability
@@ -71,7 +72,7 @@ The interface, brand system and user journeys were extracted from the SB HIC Nex
 - Payment verification always server-side; callbacks and webhook are idempotent.
 - Soft deletes for delegates.
 - Underpayment, overpayment, duplicate payments and amount/access-code mismatches are rejected and logged.
-- Mail/Telegram-style alerts never block a registration (mail is optional).
+- Mail and Telegram alerts never block a registration (both are optional).
 - Transactional SQLite/MySQL schema installer.
 
 ---
@@ -120,6 +121,30 @@ php -S 127.0.0.1:8099 -t .
 
 Open `http://127.0.0.1:8099/index.php`.
 
+### Direct deploy with git pull
+
+There is **no build step** (no Composer, npm or asset compilation). On the server, in the code root:
+
+```bash
+cd /path/to/sbosun-camp
+git pull --ff-only
+```
+
+The new code is live immediately. `.env` and `storage/` are untracked and survive pulls, and the lightweight payment schema upgrade runs automatically on the first request. For a safety net, the included `deploy.sh` dumps the database first and then pulls:
+
+```bash
+./deploy.sh
+```
+
+### Database dumps / backups
+
+- **Admin UI:** Admin → Database → **Download SQL dump** (Super Admin only, audit-logged).
+- **CLI:** `php tools/dump-db.php storage/backups/camp-$(date +%Y%m%d-%H%M%S).sql`
+- **Restore SQLite:** `sqlite3 storage/camp.sqlite < dump.sql`
+- **Restore MySQL:** `mysql -u user -p database < dump.sql`
+
+Dumps include personal data and password hashes, so keep `storage/backups/` out of the web root and off public storage.
+
 ---
 
 ## 4. MySQL instead of SQLite
@@ -146,6 +171,24 @@ Run `php install.php` once. A reference schema is included at `database/schema.m
 ---
 
 ## 5. Payment configuration
+
+### 5.0 Pricing, instalments and charges
+
+Three values live in **Admin → Settings** and are stored in the database:
+
+- **Early-bird fee / flat fee** — the base camp fee for the current phase.
+- **Number of instalments** — how many parts an instalment plan is split into (default 10).
+- **Gateway charge** — added to **every payment transaction** (default ₦150).
+
+The charge is per transaction, not per delegate:
+
+```text
+Full payment:      8,500 base + 150 charge             = 8,650
+2 instalments:     4,250 base + 150 charge each        = 4,400 each
+Bulk order (5 seats): 5 × (8,500 base + 150 charge)    = 43,250
+```
+
+A full settlement after some instalments only carries one charge for the new transaction. The server always recalculates these amounts; browser-submitted prices are ignored.
 
 **`PAYMENT_MODE` in `.env` is the single switch.** Admin → Settings displays the active mode read-only. Change the environment value and reload:
 
@@ -221,6 +264,18 @@ MAIL_FROM_NAME=SB Osun
 
 Registration confirmation and newsletter emails are attempted after the database transaction commits. If mail is not configured or fails, the registration/payment still succeeds and the failure is logged to `storage/logs/mail.log`.
 
+### 6.1 Telegram admin alerts (optional)
+
+Admins can receive a Telegram message for every started payment and every verified payment (single, instalment or bulk). Configure a bot token and one or more chat IDs in `.env`:
+
+```dotenv
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=123456789:AA...
+TELEGRAM_CHAT_ID=123456789,-1001234567890
+```
+
+`TELEGRAM_CHAT_ID` accepts a comma-separated list of user IDs, group IDs or `@channel` usernames. Telegram failures are logged and never block a registration or verified payment. The token is never rendered in HTML or written to logs.
+
 ---
 
 ## 7. Admin roles
@@ -247,7 +302,7 @@ Admin passwords are stored with `password_hash()`; there is deliberately no publ
 - `participants` — delegate record, including pay-first `profile_completed`, `nok_phone`, `nok_name`, `allergies`, `health_challenges`, guardian fields, payment totals, soft delete.
 - `bulk_orders` — buyer email/phone, seats, amount, status, reference, buyer portal token.
 - `bulk_tickets` — one row per bulk seat: unique one-time token, category, price, used flag, linked participant.
-- `payments` — one row per attempt/instalment: reference, provider reference, amount, type, plan, status, account/checkout details, nullable `bulk_order_id` for bulk payments.
+- `payments` — one row per attempt/instalment: reference, provider reference, amount (base + charge), `gateway_charge`, type, plan, status, account/checkout details, nullable `bulk_order_id` for bulk payments.
 - `payment_events` — idempotent webhook/verification ledger with raw payload.
 - `attendance` — check-in state, staff member, corrections.
 - `admin_users` — role, zone, protected flag, status, last login.
@@ -321,6 +376,7 @@ sbosun-camp/
     auth.php                admin sessions, roles, rate limits
     payments.php            fees, payments, hosted gateway, webhook
     mailer.php              SMTP mailer + templates
+    telegram.php            Telegram admin alerts
     controllers/public.php  public journeys
     controllers/admin.php   admin console
   views/
@@ -334,7 +390,9 @@ sbosun-camp/
     images/ videos/         real SB HIC assets
     memory_lane.mp3
   database/schema.mysql.sql reference MySQL schema
-  storage/                  SQLite DB, logs (gitignored)
+  tools/dump-db.php         portable SQL dump (SQLite/MySQL)
+  deploy.sh                 git pull + pre-deploy DB dump
+  storage/                  SQLite DB, logs, backups (gitignored)
 ```
 
 ---
@@ -345,7 +403,7 @@ sbosun-camp/
 2. The server computes every price; client prices are ignored.
 3. **Pay first, profile second.** No full delegate profile is required to start a payment. A verified payment unlocks the completion form.
 4. Instalments are available before the early-bird deadline. An existing instalment plan may continue after the deadline at the flat rate, but new plans cannot start.
-5. Every next instalment is `outstanding balance ÷ remaining instalments` (integer division, last payment absorbs the remainder), so price changes and prior payments are always reflected.
+5. Every next instalment is `remaining base balance ÷ remaining instalments` (integer division, last payment absorbs the remainder) **plus one gateway charge**, so price changes and prior payments are always reflected.
 6. A full payment locks in the amount actually paid; later price changes never create a balance for that delegate.
 7. Pending mock/manual payments are recalculated when the general fee changes. A stale hosted checkout is retired and a fresh checkout is required.
 8. A verified payment can only create one verification event per provider reference.
@@ -389,7 +447,8 @@ Not tested live because no credentials were supplied: real SMTP delivery and liv
 - [ ] Change the admin email/password; generate a fresh hash with the installer or password reset.
 - [ ] Configure `PAYMENT_MODE`, gateway keys, callback URL and webhook secret.
 - [ ] Configure SMTP if you want email.
-- [ ] Back up the database (`storage/camp.sqlite` or your MySQL database) before launch.
+- [ ] Back up the database before launch — use **Admin → Database → Download SQL dump** or `php tools/dump-db.php storage/backups/…`.
+- [ ] Deploy updates with `git pull --ff-only` in the code root (or `./deploy.sh`, which dumps first). No build step is required.
 - [ ] Protect `storage/` and `.env` at the web-server level; the included `.htaccess` does this on Apache.
 - [ ] Run a test registration, payment, check-in, export and ID card print.
 

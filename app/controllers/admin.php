@@ -359,13 +359,13 @@ function admin_payments_export(): void
     audit('EXPORT_PAYMENTS', 'report', 'payments');
     csv_download('sb-osun-payments-' . date('Y-m-d') . '.csv', [
         'Reference', 'Provider Reference', 'Registration ID', 'Name', 'Zone', 'Type', 'Instalment',
-        'Seats', 'Plan', 'Amount', 'Status', 'Provider', 'Paid At', 'Created At',
+        'Seats', 'Plan', 'Amount', 'Gateway Charge', 'Status', 'Provider', 'Paid At', 'Created At',
     ], array_map(static fn(array $p): array => [
         $p['reference'], $p['provider_reference'],
         $p['registration_id'] ?: ($p['bulk_order_id'] ? 'BULK' : ''),
         $p['registration_id'] ? ($p['other_name'] . ' ' . $p['surname']) : ($p['buyer_email'] ?: 'Bulk buyer'),
         $p['zone'], $p['payment_type'], $p['installment_number'], $p['bulk_seats'] ?? '',
-        $p['plan_rate'], $p['amount'], $p['status'], $p['provider'], $p['paid_at'], $p['created_at'],
+        $p['plan_rate'], $p['amount'], $p['gateway_charge'] ?? 0, $p['status'], $p['provider'], $p['paid_at'], $p['created_at'],
     ], $rows));
 }
 
@@ -632,6 +632,7 @@ function admin_settings(): void
         'admin'          => $admin,
         'classes'        => $classes,
         'gateway_ready'  => gateway_configured(),
+        'telegram_ready' => telegram_configured(),
         'mail_ready'     => mail_configured(),
     ], 'admin/layout');
 }
@@ -647,6 +648,16 @@ function admin_settings_save(): void
         flash('error', 'Fees must be positive and the flat rate cannot be lower than the early-bird rate.');
         redirect_route('admin/settings');
     }
+    $installments = (int) post('installment_count', 10);
+    if ($installments < 1 || $installments > 60) {
+        flash('error', 'The number of instalments must be between 1 and 60.');
+        redirect_route('admin/settings');
+    }
+    $charge = (int) post('gateway_charge', 0);
+    if ($charge < 0) {
+        flash('error', 'The gateway charge cannot be negative.');
+        redirect_route('admin/settings');
+    }
     if (!valid_email((string) post('support_email'))) {
         flash('error', 'Enter a valid support email address.');
         redirect_route('admin/settings');
@@ -654,7 +665,8 @@ function admin_settings_save(): void
 
     $fields = [
         'name', 'year', 'camp_start', 'camp_end', 'venue_name', 'venue_address',
-        'early_bird_fee', 'flat_fee', 'early_bird_deadline', 'default_house_capacity',
+        'early_bird_fee', 'flat_fee', 'early_bird_deadline', 'installment_count', 'gateway_charge',
+        'default_house_capacity',
         'support_email', 'support_phone', 'payment_bank_name',
         'payment_account_name', 'payment_account_number', 'payment_whatsapp',
     ];
@@ -812,6 +824,31 @@ function admin_database_query(): void
     }
 
     admin_database_render($result);
+}
+
+function admin_database_dump(): void
+{
+    $admin = require_admin(['SUPER_ADMIN']);
+    audit('DUMP_DATABASE', 'database', 'sql', null, [
+        'admin'  => $admin['name'],
+        'driver' => (string) config('db.driver'),
+    ]);
+
+    $filename = 'camp-db-' . date('Ymd-His') . '.sql';
+    header('Content-Type: application/sql; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Cache-Control: no-store, private');
+    header('X-Content-Type-Options: nosniff');
+
+    $out = fopen('php://output', 'w');
+    if ($out === false) {
+        http_response_code(500);
+        echo 'Could not open the dump stream.';
+        return;
+    }
+    db_dump_write($out);
+    fclose($out);
+    exit;
 }
 
 function admin_database_render(?array $queryResult = null): void

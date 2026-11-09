@@ -1,21 +1,28 @@
 <?php
 declare(strict_types=1);
 
-const INSTALLMENT_COUNT = 10;
-
 /**
  * Small in-place upgrade so an already-installed database keeps working.
  * Cheap on every request (one PRAGMA/SHOW COLUMNS check).
  */
 function ensure_payment_schema(): void
 {
-    if (!db_ready() || db_column_exists('payments', 'access_code')) {
+    if (!db_ready()) {
         return;
     }
-    try {
-        db()->exec('ALTER TABLE payments ADD COLUMN access_code VARCHAR(191) NULL');
-    } catch (Throwable $e) {
-        log_error('Could not add payments.access_code: ' . $e->getMessage());
+    $columns = [
+        'access_code'    => 'VARCHAR(191) NULL',
+        'gateway_charge' => 'INT NOT NULL DEFAULT 0',
+    ];
+    foreach ($columns as $column => $definition) {
+        if (db_column_exists('payments', $column)) {
+            continue;
+        }
+        try {
+            db()->exec("ALTER TABLE payments ADD COLUMN {$column} {$definition}");
+        } catch (Throwable $e) {
+            log_error("Could not add payments.{$column}: " . $e->getMessage());
+        }
     }
 }
 
@@ -38,65 +45,143 @@ function has_installment_plan(int $participantId): bool
     ) > 0;
 }
 
-function participant_owed(array $participant): int
+function participant_total_base(): int
 {
-    $paid = participant_paid((int) $participant['id']);
+    return current_fee();
+}
 
-    // A full payment locks in the price that was actually charged. Later
-    // general-price changes must never create a new balance for a paid delegate.
-    $full = db_one(
-        "SELECT plan_rate, amount FROM payments
+/** Base fee already settled (excludes gateway charges). */
+function participant_base_paid(int $participantId): int
+{
+    return (int) db_value(
+        "SELECT COALESCE(SUM(amount - gateway_charge), 0) FROM payments
+         WHERE participant_id = ? AND status = 'VERIFIED' AND payment_type IN ('FULL','INSTALLMENT')",
+        [$participantId],
+        0
+    );
+}
+
+function participant_charge_paid(int $participantId): int
+{
+    return (int) db_value(
+        "SELECT COALESCE(SUM(gateway_charge), 0) FROM payments
+         WHERE participant_id = ? AND status = 'VERIFIED' AND payment_type IN ('FULL','INSTALLMENT')",
+        [$participantId],
+        0
+    );
+}
+
+function locked_full_payment(int $participantId): ?array
+{
+    return db_one(
+        "SELECT amount, gateway_charge FROM payments
          WHERE participant_id = ? AND payment_type = 'FULL' AND status = 'VERIFIED'
          ORDER BY id LIMIT 1",
-        [$participant['id']]
+        [$participantId]
     );
+}
+
+/** Amount required to settle the whole base fee in one payment, including one charge. */
+function full_payment_amount(array $participant): ?int
+{
+    $participantId = (int) $participant['id'];
+    if (locked_full_payment($participantId)) {
+        return null;
+    }
+    $baseRemaining = max(0, participant_total_base() - participant_base_paid($participantId));
+    if ($baseRemaining <= 0) {
+        return null;
+    }
+    return $baseRemaining + gateway_charge();
+}
+
+/** Split a base total into `count` instalments and add the per-transaction charge. */
+function installment_cash_amount(int $baseTotal, int $slot, int $count, ?int $charge = null): int
+{
+    $count = max(1, $count);
+    $slot = max(1, min($slot, $count));
+    $charge ??= gateway_charge();
+    $base = (int) round($baseTotal / $count);
+    $baseAmount = $slot < $count ? $base : $baseTotal - ($base * ($count - 1));
+    return max(1, $baseAmount) + $charge;
+}
+
+function participant_owed(array $participant): int
+{
+    $participantId = (int) $participant['id'];
+    $paid = participant_paid($participantId);
+
+    // A completed full payment locks in what was actually charged.
+    $full = locked_full_payment($participantId);
     if ($full) {
         return max($paid, (int) $full['amount']);
     }
 
-    // Instalment plans adapt to the current general price. Existing plans may
-    // continue after the early-bird deadline at the flat rate; new plans cannot.
-    if (has_installment_plan((int) $participant['id'])) {
-        return phase() === 'FLAT'
-            ? (int) setting('flat_fee', 12000)
-            : (int) setting('early_bird_fee', 8500);
+    $baseTotal = participant_total_base();
+    $basePaid = participant_base_paid($participantId);
+    $chargePaid = participant_charge_paid($participantId);
+    $charge = gateway_charge();
+
+    if ($basePaid >= $baseTotal) {
+        return max($paid, $baseTotal);
     }
 
-    return current_fee();
+    // Instalment plans adapt to the current general price. Every remaining
+    // instalment still carries one gateway charge.
+    if (has_installment_plan($participantId)) {
+        $count = installment_count();
+        $verified = verified_installment_count($participantId);
+        $remainingSlots = max(1, $count - $verified);
+        return $baseTotal + $chargePaid + ($charge * $remainingSlots);
+    }
+
+    // A single full payment carries exactly one charge.
+    return $baseTotal + $charge;
 }
 
 /**
- * Quotes the next instalment from the real remaining balance, not by
- * repeatedly dividing the old price. This is what makes a plan adjust safely
- * when an admin changes the general camp fee or when early bird lapses.
+ * Quotes the next instalment from the real remaining base balance. The quote
+ * always includes exactly one gateway charge.
  */
 function installment_quote(array $participant): ?array
 {
-    $total = participant_owed($participant);
-    $paid = participant_paid((int) $participant['id']);
-    $balance = max(0, $total - $paid);
-    if ($balance <= 0) {
+    $participantId = (int) $participant['id'];
+    if (locked_full_payment($participantId)) {
+        return null;
+    }
+    $baseTotal = participant_total_base();
+    $basePaid = participant_base_paid($participantId);
+    $baseRemaining = max(0, $baseTotal - $basePaid);
+    if ($baseRemaining <= 0) {
         return null;
     }
 
-    $verified = verified_installment_count((int) $participant['id']);
-    $started = has_installment_plan((int) $participant['id']);
+    $verified = verified_installment_count($participantId);
+    $started = has_installment_plan($participantId);
+    $count = installment_count();
+
     if (!$started && phase() !== 'EARLY_BIRD') {
         return null;
     }
-    if ($verified >= INSTALLMENT_COUNT) {
+    if ($verified >= $count) {
         return null;
     }
 
-    $slotsLeft = max(1, INSTALLMENT_COUNT - $verified);
-    $amount = $slotsLeft === 1 ? $balance : max(1, intdiv($balance, $slotsLeft));
-    $amount = min($amount, $balance);
+    $slotsLeft = max(1, $count - $verified);
+    $baseAmount = $slotsLeft === 1 ? $baseRemaining : max(1, intdiv($baseRemaining, $slotsLeft));
+    $baseAmount = min($baseAmount, $baseRemaining);
+    $charge = gateway_charge();
+    $amount = $baseAmount + $charge;
+    $paid = participant_paid($participantId);
+    $total = $baseTotal + participant_charge_paid($participantId) + ($charge * $slotsLeft);
 
     return [
         'amount'      => $amount,
-        'slot'        => min($verified + 1, INSTALLMENT_COUNT),
+        'base_amount' => $baseAmount,
+        'charge'      => $charge,
+        'slot'        => min($verified + 1, $count),
         'slots_left'  => $slotsLeft,
-        'balance'     => $balance,
+        'balance'     => max(0, $total - $paid),
         'total'       => $total,
         'started'     => $started,
         'plan_rate'   => phase() === 'EARLY_BIRD' ? 'EARLY_BIRD' : 'FLAT',
@@ -107,21 +192,30 @@ function fee_for(string $type, ?int $installment = null, ?array $participant = n
 {
     $isEarly = phase() === 'EARLY_BIRD';
     $planRate = $isEarly ? 'EARLY_BIRD' : 'FLAT';
+    $charge = gateway_charge();
 
     if ($participant !== null) {
-        $total = participant_owed($participant);
-        $paid = participant_paid((int) $participant['id']);
-        $balance = max(0, $total - $paid);
+        $participantId = (int) $participant['id'];
+        if (locked_full_payment($participantId)) {
+            throw new RuntimeException('This registration is already fully paid.');
+        }
+        $baseTotal = participant_total_base();
+        $basePaid = participant_base_paid($participantId);
+        $chargePaid = participant_charge_paid($participantId);
+        $baseRemaining = max(0, $baseTotal - $basePaid);
 
         if ($type === 'FULL') {
-            if ($balance <= 0) {
+            if ($baseRemaining <= 0) {
                 throw new RuntimeException('This registration is already fully paid.');
             }
+            $amount = $baseRemaining + $charge;
             return [
-                'plan_rate' => $planRate,
-                'amount'    => $balance,
-                'total_fee' => $total,
-                'balance'   => $balance,
+                'plan_rate'      => $planRate,
+                'amount'         => $amount,
+                'base_amount'    => $baseRemaining,
+                'gateway_charge' => $charge,
+                'total_fee'      => $baseTotal + $chargePaid + $charge,
+                'balance'        => $amount,
             ];
         }
 
@@ -134,36 +228,48 @@ function fee_for(string $type, ?int $installment = null, ?array $participant = n
             );
         }
         return [
-            'plan_rate'   => $quote['plan_rate'],
-            'amount'      => $quote['amount'],
-            'total_fee'   => $quote['total'],
-            'balance'     => $quote['balance'],
-            'installment' => $quote['slot'],
-            'slots_left'  => $quote['slots_left'],
+            'plan_rate'      => $quote['plan_rate'],
+            'amount'         => $quote['amount'],
+            'base_amount'    => $quote['base_amount'],
+            'gateway_charge' => $quote['charge'],
+            'total_fee'      => $quote['total'],
+            'balance'        => $quote['balance'],
+            'installment'    => $quote['slot'],
+            'slots_left'     => $quote['slots_left'],
         ];
     }
 
-    // Generic quote (used for bulk seats).
-    $total = current_fee();
+    // Generic quote (bulk seats / demo data): one charge per transaction.
+    $baseTotal = current_fee();
     if ($type === 'FULL') {
-        return ['plan_rate' => $planRate, 'amount' => $total, 'total_fee' => $total, 'balance' => $total];
+        $amount = $baseTotal + $charge;
+        return [
+            'plan_rate'      => $planRate,
+            'amount'         => $amount,
+            'base_amount'    => $baseTotal,
+            'gateway_charge' => $charge,
+            'total_fee'      => $amount,
+            'balance'        => $amount,
+        ];
     }
 
     if (!$isEarly) {
         throw new RuntimeException('The instalment plan is only available before the early-bird deadline.');
     }
+    $count = installment_count();
     $n = (int) $installment;
-    if ($n < 1 || $n > INSTALLMENT_COUNT) {
-        throw new RuntimeException('Instalment number must be between 1 and ' . INSTALLMENT_COUNT . '.');
+    if ($n < 1 || $n > $count) {
+        throw new RuntimeException('Instalment number must be between 1 and ' . $count . '.');
     }
-    $base = (int) round($total / INSTALLMENT_COUNT);
-    $amount = $n < INSTALLMENT_COUNT ? $base : $total - ($base * (INSTALLMENT_COUNT - 1));
+    $amount = installment_cash_amount($baseTotal, $n, $count, $charge);
     return [
-        'plan_rate'   => $planRate,
-        'amount'      => $amount,
-        'total_fee'   => $total,
-        'balance'     => $total,
-        'installment' => $n,
+        'plan_rate'      => $planRate,
+        'amount'         => $amount,
+        'base_amount'    => $amount - $charge,
+        'gateway_charge' => $charge,
+        'total_fee'      => $baseTotal + ($count * $charge),
+        'balance'        => $baseTotal + ($count * $charge),
+        'installment'    => $n,
     ];
 }
 
@@ -376,6 +482,7 @@ function start_payment(array $participant, string $type, ?int $installment = nul
         'checkout_url'           => null,
         'provider_reference'     => null,
         'access_code'            => null,
+        'gateway_charge'         => (int) ($fee['gateway_charge'] ?? gateway_charge()),
         'failure_reason'         => null,
         'updated_at'             => now(),
     ];
@@ -441,11 +548,12 @@ function start_payment(array $participant, string $type, ?int $installment = nul
     ]);
 
     $payment = db_one('SELECT * FROM payments WHERE id = ?', [$paymentId]);
+    telegram_notify_payment_started($payment, $mode);
     return [
         'payment' => $payment,
         'mode'    => $mode,
         'account' => $account,
-        'label'   => $type === 'INSTALLMENT' ? 'Instalment ' . $slot . '/' . INSTALLMENT_COUNT : 'Full payment',
+        'label'   => $type === 'INSTALLMENT' ? 'Instalment ' . $slot . '/' . installment_count() : 'Full payment',
         'whatsapp' => $mode === 'manual' ? whatsapp_number() : null,
     ];
 }
@@ -473,7 +581,7 @@ function reconcile_pending_payments(array $participant, ?array $quote, int $bala
             && (int) $payment['installment_number'] === (int) $quote['slot']) {
             $expected = (int) $quote['amount'];
         } elseif ($payment['payment_type'] === 'FULL' && $balance > 0) {
-            $expected = $balance;
+            $expected = full_payment_amount($participant);
         }
         if ($expected === null || $expected === (int) $payment['amount']) {
             continue;
@@ -534,7 +642,8 @@ function create_bulk_order(string $email, string $phone, array $cart): array
         throw new RuntimeException('A single bulk order is limited to 50 seats.');
     }
 
-    $price = current_fee();
+    $charge = gateway_charge();
+    $price = current_fee() + $charge;
     $amount = $price * $seats;
     $token = random_token(24);
 
@@ -636,6 +745,7 @@ function start_bulk_payment(array $order): array
         'checkout_url'           => null,
         'provider_reference'     => null,
         'access_code'            => null,
+        'gateway_charge'         => gateway_charge() * (int) $order['seats'],
         'failure_reason'         => null,
         'bulk_order_id'          => (int) $order['id'],
         'updated_at'             => now(),
@@ -694,8 +804,11 @@ function start_bulk_payment(array $order): array
         'amount' => (int) $order['amount'], 'mode' => $mode, 'reference' => $reference,
     ]);
 
+    $payment = db_one('SELECT * FROM payments WHERE id = ?', [$paymentId]);
+    telegram_notify_payment_started($payment, $mode);
+
     return [
-        'payment'  => db_one('SELECT * FROM payments WHERE id = ?', [$paymentId]),
+        'payment'  => $payment,
         'mode'     => $mode,
         'account'  => $account,
         'label'    => 'Bulk registration · ' . (int) $order['seats'] . ' seats',
@@ -855,6 +968,11 @@ function mark_payment_verified(array $payment, string $providerReference, int $a
             audit('VERIFY_BULK_PAYMENT', 'bulk_order', (string) $fresh['bulk_order_id'], ['status' => $fresh['status']], [
                 'status' => 'VERIFIED', 'amount' => $amount, 'source' => $source,
             ]);
+            telegram_notify_payment_verified(
+                db_one('SELECT * FROM payments WHERE id = ?', [$fresh['id']]) ?? $fresh,
+                $amount,
+                $source
+            );
             if (($order['status'] ?? '') === 'PAID') {
                 send_bulk_confirmation($order);
             }
@@ -876,6 +994,11 @@ function mark_payment_verified(array $payment, string $providerReference, int $a
             'participant' => $participant['registration_id'] ?? '',
             'payment'     => $participant['payment_status'] ?? '',
         ]);
+        telegram_notify_payment_verified(
+            db_one('SELECT * FROM payments WHERE id = ?', [$fresh['id']]) ?? $fresh,
+            $amount,
+            $source
+        );
 
         if (($participant['payment_status'] ?? '') === 'FULLY_PAID' && (int) ($participant['profile_completed'] ?? 0) === 1) {
             send_registration_confirmation($participant);

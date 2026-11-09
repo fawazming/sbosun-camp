@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS payments (
   provider_reference VARCHAR(191) NULL,
   access_code VARCHAR(191) NULL,
   amount INT NOT NULL,
+  gateway_charge INT NOT NULL DEFAULT 0,
   payment_type VARCHAR(16) NOT NULL,
   installment_number INT NULL,
   plan_rate VARCHAR(16) NOT NULL,
@@ -198,7 +199,7 @@ CREATE TABLE IF NOT EXISTS throttle (
 INSERT IGNORE INTO settings (skey, svalue) VALUES
 ('name','SB HIC 2026'),('year','2026'),('camp_start','2026-12-24'),('camp_end','2026-12-28'),
 ('venue_name','Oduduwa College'),('venue_address','Ile-Ife, Osun State'),
-('early_bird_fee','8500'),('flat_fee','12000'),('early_bird_deadline','2026-11-30 23:59:59'),
+('early_bird_fee','8500'),('flat_fee','12000'),('installment_count','10'),('gateway_charge','150'),('early_bird_deadline','2026-11-30 23:59:59'),
 ('default_house_capacity','40'),('registration_open','1'),('maintenance_mode','0'),
 ('support_email','support@sbosun.org'),('support_phone','09053444178'),('payment_mode','mock');
 

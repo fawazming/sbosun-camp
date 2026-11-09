@@ -1,7 +1,10 @@
 <?php
 $fee = current_fee();
 $early = phase() === 'EARLY_BIRD';
-$installment = (int) round($fee / INSTALLMENT_COUNT);
+$charge = gateway_charge();
+$installmentCount = installment_count();
+$fullTotal = $fee + $charge;
+$installment = installment_cash_amount($fee, 1, $installmentCount);
 $selectedCategory = old('category', 'Undergraduate');
 ?>
 <main class="section" style="padding-top:34px">
@@ -26,7 +29,7 @@ $selectedCategory = old('category', 'Undergraduate');
             <span class="af-icon">1</span>
             <div>
               <h5>Pay securely</h5>
-              <p>Pay in full or start a 10-part instalment plan before the early-bird deadline.</p>
+              <p>Pay in full or start a <?= $installmentCount ?>-part instalment plan before the early-bird deadline.</p>
             </div>
           </div>
           <div class="aside-feature">
@@ -56,8 +59,10 @@ $selectedCategory = old('category', 'Undergraduate');
           <div class="calc-label">🧮 PAYMENT SUMMARY</div>
           <div class="calc-card">
             <div class="calc-row"><span>Camp fee (<?= e(phase_label()) ?>)</span><strong><?= money($fee) ?></strong></div>
-            <div class="calc-row gold" data-installment-note><span>Instalment 1 of <?= INSTALLMENT_COUNT ?></span><span><?= money($installment) ?></span></div>
-            <div class="calc-row" data-installment-note><span>Remaining instalments</span><span>recalculated from your balance</span></div>
+            <div class="calc-row"><span>Gateway charge</span><span><?= money($charge) ?></span></div>
+            <div class="calc-row"><span>Pay in full</span><strong><?= money($fullTotal) ?></strong></div>
+            <div class="calc-row gold" data-installment-note><span>Instalment 1 of <?= $installmentCount ?></span><span><?= money($installment) ?></span></div>
+            <div class="calc-row" data-installment-note><span>Each later instalment</span><span>balance split + <?= money($charge) ?> charge</span></div>
             <div class="calc-row" data-full-note style="color:#6ee7b7">✓ Full single payment selected</div>
           </div>
         </div>
@@ -96,15 +101,15 @@ $selectedCategory = old('category', 'Undergraduate');
                 <label>
                   <input type="radio" name="preferred_plan" value="FULL" data-plan checked>
                   <strong>Pay in Full</strong>
-                  <span><?= money($fee) ?> once</span>
+                  <span><?= money($fullTotal) ?> once</span>
                 </label>
                 <label <?= $early ? '' : 'style="opacity:.45;pointer-events:none"' ?>>
                   <input type="radio" name="preferred_plan" value="INSTALLMENT" data-plan <?= $early ? '' : 'disabled' ?>>
                   <strong>Split Payments</strong>
-                  <span><?= $early ? INSTALLMENT_COUNT . ' instalments from ' . money($installment) : 'Early bird only' ?></span>
+                  <span><?= $early ? $installmentCount . ' instalments from ' . money($installment) : 'Early bird only' ?></span>
                 </label>
               </div>
-              <p class="small muted" style="margin-top:7px">Instalments adapt to the current general fee. They are only available before <?= e(nice_date((string) setting('early_bird_deadline'), 'j F Y')) ?>.</p>
+              <p class="small muted" style="margin-top:7px">Every payment includes a <?= money($charge) ?> gateway charge. Instalments adapt to the current general fee and are only available before <?= e(nice_date((string) setting('early_bird_deadline'), 'j F Y')) ?>.</p>
             </div>
 
             <div class="span-12">

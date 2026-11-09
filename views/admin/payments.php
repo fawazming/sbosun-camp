@@ -64,8 +64,8 @@ $query = $_GET; unset($query['r']);
                 <div class="name"><?= e(delegate_name($p)) ?></div><div class="sub"><?= e($p['registration_id'] ?: '—') ?> · <?= e($p['zone'] ?: 'Profile pending') ?></div>
               <?php endif; ?>
             </td>
-            <td class="small"><?= e($p['payment_type'] === 'FULL' ? 'Full' : ($p['payment_type'] === 'BULK' ? 'Bulk · ' . (int) ($p['bulk_seats'] ?? 0) . ' seats' : 'Instalment ' . $p['installment_number'] . '/' . INSTALLMENT_COUNT)) ?><div class="sub"><?= e($p['plan_rate']) ?></div></td>
-            <td style="font-weight:800;white-space:nowrap"><?= money((int) $p['amount']) ?></td>
+            <td class="small"><?= e($p['payment_type'] === 'FULL' ? 'Full' : ($p['payment_type'] === 'BULK' ? 'Bulk · ' . (int) ($p['bulk_seats'] ?? 0) . ' seats' : 'Instalment ' . $p['installment_number'] . '/' . installment_count())) ?><div class="sub"><?= e($p['plan_rate']) ?></div></td>
+            <td style="font-weight:800;white-space:nowrap"><?= money((int) $p['amount']) ?><?php if ((int) ($p['gateway_charge'] ?? 0) > 0): ?><div class="sub" style="font-weight:400">incl. <?= money((int) $p['gateway_charge']) ?> charge</div><?php endif; ?></td>
             <td><span class="<?= e(badge_class($p['status'])) ?>"><?= e($p['status']) ?></span></td>
             <td class="small"><?= e($p['provider']) ?></td>
             <td class="small muted"><?= e(nice_date($p['paid_at'] ?: $p['created_at'], 'j M, g:ia')) ?></td>

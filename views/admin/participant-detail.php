@@ -130,7 +130,7 @@ $profileComplete = (int) ($participant['profile_completed'] ?? 0) === 1;
           <?php foreach ($payments as $p): ?>
             <tr>
               <td class="mono small"><?= e($p['reference']) ?><div class="sub"><?= e($p['provider_reference'] ?: '') ?></div></td>
-              <td><?= e($p['payment_type'] === 'FULL' ? 'Full' : 'Instalment ' . $p['installment_number'] . '/' . INSTALLMENT_COUNT) ?></td>
+              <td><?= e($p['payment_type'] === 'FULL' ? 'Full' : 'Instalment ' . $p['installment_number'] . '/' . installment_count()) ?></td>
               <td style="font-weight:800"><?= money((int) $p['amount']) ?></td>
               <td class="small"><?= e($p['plan_rate']) ?></td>
               <td><span class="<?= e(badge_class($p['status'])) ?>"><?= e($p['status']) ?></span></td>

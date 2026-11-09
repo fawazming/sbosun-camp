@@ -1,13 +1,13 @@
 <IfModule mod_rewrite.c>
     RewriteEngine On
-    RewriteRule ^(app|views|storage|database)(/|$) - [F,L]
+    RewriteRule ^(app|views|storage|database|tools)(/|$) - [F,L]
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteCond %{REQUEST_FILENAME} !-d
     RewriteRule ^ index.php [L]
 </IfModule>
 
 # Never serve application/config/storage/database files directly.
-<FilesMatch "^(config\.php|routes\.php|\.env.*|.*\.sqlite|.*\.log)$">
+<FilesMatch "^(config\.php|routes\.php|deploy\.sh|\.env.*|.*\.sqlite|.*\.log)$">
     Require all denied
 </FilesMatch>
 

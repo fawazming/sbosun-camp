@@ -33,6 +33,7 @@ require __DIR__ . '/db.php';
 require __DIR__ . '/auth.php';
 require __DIR__ . '/payments.php';
 require __DIR__ . '/mailer.php';
+require __DIR__ . '/telegram.php';
 
 ensure_payment_schema();
 
